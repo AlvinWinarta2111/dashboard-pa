@@ -7,19 +7,21 @@ st.set_page_config(page_title="Physical Availability - Data Delay Time", layout=
 st.title("Physical Availability Dashboard — Data Delay Time")
 
 # -------------------------
-# Helper functions
+# Config
 # -------------------------
-def load_data_from_file(uploaded_file=None, local_path="C:/Users/alvin/Dashboard_Adaro/Physical Availability Dashboard/Data/Draft_New Version_Weekly_Report_Maintenance_CHPP.xlsx"):
+RAW_URL = "https://raw.githubusercontent.com/AlvinWinarta2111/dashboard-pa/refs/heads/main/Draft_New%20Version_Weekly_Report_Maintenance_CHPP.xlsx"
 
+# -------------------------
+# Load + Clean Function
+# -------------------------
+def load_data_from_url():
     try:
-        if uploaded_file is not None:
-            raw = pd.read_excel(uploaded_file, sheet_name="Data Delay Time", header=None)
-        else:
-            raw = pd.read_excel(local_path, sheet_name="Data Delay Time", header=None)
+        raw = pd.read_excel(RAW_URL, sheet_name="Data Delay Time", header=None)
     except Exception as e:
         st.error(f"Unable to read sheet 'Data Delay Time': {e}")
         return None
 
+    # Detect header row
     header_row = None
     for i in range(20):
         row_values = raw.iloc[i].astype(str).str.upper().tolist()
@@ -31,11 +33,7 @@ def load_data_from_file(uploaded_file=None, local_path="C:/Users/alvin/Dashboard
         st.error("Could not detect header row automatically. Please check the Excel file format.")
         return None
 
-    if uploaded_file is not None:
-        df = pd.read_excel(uploaded_file, sheet_name="Data Delay Time", header=header_row)
-    else:
-        df = pd.read_excel(local_path, sheet_name="Data Delay Time", header=header_row)
-
+    df = pd.read_excel(RAW_URL, sheet_name="Data Delay Time", header=header_row)
     df.columns = [str(c).strip() for c in df.columns]
 
     replacements = {
@@ -126,15 +124,15 @@ def load_data_from_file(uploaded_file=None, local_path="C:/Users/alvin/Dashboard
     return df
 
 # -------------------------
-# Load data (sidebar)
+# Load data
 # -------------------------
-st.sidebar.header("Data source")
-uploaded_file = st.sidebar.file_uploader("Upload Excel file", type=["xlsx", "xls"])
-df = load_data_from_file(uploaded_file)
-
+df = load_data_from_url()
 if df is None:
     st.stop()
 
+# -------------------------
+# Sidebar Filters
+# -------------------------
 st.sidebar.header("Filters & Options")
 granularity = st.sidebar.selectbox("Time granularity", options=["WEEK", "PERIOD_MONTH"], index=1)
 
@@ -151,7 +149,9 @@ if selected_month != "All":
 if category_filter:
     filtered = filtered[filtered["CATEGORY"].isin(category_filter)]
 
+# -------------------------
 # Aggregations
+# -------------------------
 group_field = granularity
 agg = filtered.groupby(group_field).agg(
     total_delay_hours=pd.NamedAgg(column="DELAY", aggfunc="sum"),
@@ -169,7 +169,9 @@ elif group_field == "PERIOD_MONTH":
     agg["__order"] = agg[group_field].apply(lambda v: order.index(v) if v in order else 999)
     agg = agg.sort_values("__order").drop(columns="__order")
 
-# KPI calculations
+# -------------------------
+# KPI Calculations
+# -------------------------
 total_delay = filtered["DELAY"].sum()
 available_time = filtered["AVAILABLE_TIME_MONTH"].dropna().sum() if filtered["AVAILABLE_TIME_MONTH"].notna().any() else None
 
@@ -201,8 +203,6 @@ if ma_target > 1:
 # -------------------------
 # KPI cards + Donut chart
 # -------------------------
-
-# Build donut chart (category breakdown of delays)
 donut_data = (
     filtered.groupby("CATEGORY")["DELAY"]
     .sum()
@@ -214,17 +214,15 @@ donut_fig = go.Figure(
     data=[go.Pie(
         labels=donut_data["CATEGORY"],
         values=donut_data["DELAY"],
-        hole=0.4,  # makes it a donut
+        hole=0.4,
         textinfo="label+percent",
         hovertemplate="%{label}: %{value:.2f} hrs<extra></extra>"
     )]
 )
 donut_fig.update_layout(margin=dict(t=20, b=20, l=20, r=20))
 
-# KPI + Donut layout (2:3 ratio)
 left_col, right_col = st.columns([2,3])
 
-# LEFT SIDE (KPIs stacked vertically)
 with left_col:
     st.subheader("Key KPIs")
 
@@ -241,14 +239,18 @@ with left_col:
     st.metric("Total Delay Hours (filtered)", f"{total_delay:.2f} hrs")
     st.metric("Available Time (sum)", f"{available_time:.2f} hrs" if available_time else "N/A")
 
-# RIGHT SIDE (Donut chart)
 with right_col:
     st.subheader("Delay Breakdown (Monthly)")
-    st.plotly_chart(donut_fig, use_container_width=True)
+    if not donut_data.empty:
+        st.plotly_chart(donut_fig, use_container_width=True)
+    else:
+        st.info("No delay data available for the selected filters.")
 
 st.markdown("---")
 
+# -------------------------
 # Trend Analysis
+# -------------------------
 st.subheader("Trend: Total Delay Hours vs PA%")
 
 agg["PA_pct"] = None
@@ -292,7 +294,9 @@ fig_trend.update_layout(
 
 st.plotly_chart(fig_trend, use_container_width=True)
 
+# -------------------------
 # Pareto
+# -------------------------
 st.subheader("Top Delay Causes (Pareto)")
 
 cause_agg = filtered.groupby("CAUSE").agg(hours=("DELAY","sum")).reset_index().sort_values("hours", ascending=False)
@@ -315,7 +319,9 @@ st.plotly_chart(fig_pareto, use_container_width=True)
 
 st.markdown("---")
 
+# -------------------------
 # Drill-down table
+# -------------------------
 st.subheader("Drill-down: Delay Records")
 display_cols = ["WEEK","MONTH","YEAR","DELAY","CATEGORY","CAUSE","MTN_NOTE","NOTE"]
 if not show_notes:

@@ -7,25 +7,24 @@ st.set_page_config(page_title="Physical Availability - Data Delay Time", layout=
 st.title("Physical Availability Dashboard — Data Delay Time")
 st.markdown(
     """
-    Interactive Streamlit dashboard prototype that reads the **'Data Delay Time'** sheet
-    and provides KPIs, breakdowns, trends, Pareto, and drill-down tables.
+    Interactive Streamlit dashboard that reads the **'Data Delay Time'** sheet
+    from GitHub and provides KPIs, breakdowns, trends, Pareto, and drill-down tables.
     """
 )
 
 # -------------------------
-# Helper functions
+# Helper function
 # -------------------------
-def load_data_from_file(uploaded_file=None, local_path="C:/Users/alvin/Dashboard_Adaro/Physical Availability Dashboard/Data/Draft_New Version_Weekly_Report_Maintenance_CHPP.xlsx"):
+def load_data_from_github():
+    file_url = "https://raw.githubusercontent.com/AlvinWinarta2111/dashboard-pa/main/Draft_New%20Version_Weekly_Report_Maintenance_CHPP.xlsx"
 
     try:
-        if uploaded_file is not None:
-            raw = pd.read_excel(uploaded_file, sheet_name="Data Delay Time", header=None)
-        else:
-            raw = pd.read_excel(local_path, sheet_name="Data Delay Time", header=None)
+        raw = pd.read_excel(file_url, sheet_name="Data Delay Time", header=None)
     except Exception as e:
-        st.error(f"Unable to read sheet 'Data Delay Time': {e}")
+        st.error(f"Unable to read sheet 'Data Delay Time' from GitHub: {e}")
         return None
 
+    # Detect header row
     header_row = None
     for i in range(20):
         row_values = raw.iloc[i].astype(str).str.upper().tolist()
@@ -37,10 +36,11 @@ def load_data_from_file(uploaded_file=None, local_path="C:/Users/alvin/Dashboard
         st.error("Could not detect header row automatically. Please check the Excel file format.")
         return None
 
-    if uploaded_file is not None:
-        df = pd.read_excel(uploaded_file, sheet_name="Data Delay Time", header=header_row)
-    else:
-        df = pd.read_excel(local_path, sheet_name="Data Delay Time", header=header_row)
+    try:
+        df = pd.read_excel(file_url, sheet_name="Data Delay Time", header=header_row)
+    except Exception as e:
+        st.error(f"Unable to re-read sheet with headers: {e}")
+        return None
 
     df.columns = [str(c).strip() for c in df.columns]
 
@@ -133,15 +133,15 @@ def load_data_from_file(uploaded_file=None, local_path="C:/Users/alvin/Dashboard
     return df
 
 # -------------------------
-# Load data (sidebar)
+# Load data
 # -------------------------
-st.sidebar.header("Data source")
-uploaded_file = st.sidebar.file_uploader("Upload Excel file", type=["xlsx", "xls"])
-df = load_data_from_file(uploaded_file)
-
+df = load_data_from_github()
 if df is None:
     st.stop()
 
+# -------------------------
+# Sidebar filters
+# -------------------------
 st.sidebar.header("Filters & Options")
 granularity = st.sidebar.selectbox("Time granularity", options=["WEEK", "PERIOD_MONTH", "PERIOD_YEAR"], index=1)
 
@@ -169,7 +169,9 @@ if selected_month != "All":
 if category_filter:
     filtered = filtered[filtered["CATEGORY"].isin(category_filter)]
 
+# -------------------------
 # Aggregations
+# -------------------------
 group_field = granularity
 agg = filtered.groupby(group_field).agg(
     total_delay_hours=pd.NamedAgg(column="DELAY", aggfunc="sum"),
@@ -189,7 +191,9 @@ elif group_field == "PERIOD_MONTH":
 elif group_field == "PERIOD_YEAR":
     agg = agg.sort_values("PERIOD_YEAR")
 
+# -------------------------
 # KPI calculations
+# -------------------------
 total_delay = filtered["DELAY"].sum()
 available_time = filtered["AVAILABLE_TIME_MONTH"].dropna().sum() if filtered["AVAILABLE_TIME_MONTH"].notna().any() else None
 
@@ -218,7 +222,9 @@ if pa_target > 1:
 if ma_target > 1:
     ma_target = ma_target / 100.0
 
+# -------------------------
 # KPI cards
+# -------------------------
 kpi1, kpi2, kpi3, kpi4 = st.columns([2,2,2,2])
 
 with kpi1:
@@ -241,7 +247,9 @@ with kpi4:
 
 st.markdown("---")
 
+# -------------------------
 # Trend Analysis
+# -------------------------
 st.subheader("Trend: Total Delay Hours vs PA%")
 
 agg["PA_pct"] = None
@@ -285,7 +293,9 @@ fig_trend.update_layout(
 
 st.plotly_chart(fig_trend, use_container_width=True)
 
+# -------------------------
 # Pareto
+# -------------------------
 st.subheader("Top Delay Causes (Pareto)")
 
 cause_agg = filtered.groupby("CAUSE").agg(hours=("DELAY","sum")).reset_index().sort_values("hours", ascending=False)
@@ -308,7 +318,9 @@ st.plotly_chart(fig_pareto, use_container_width=True)
 
 st.markdown("---")
 
+# -------------------------
 # Drill-down table
+# -------------------------
 st.subheader("Drill-down: Delay Records")
 display_cols = ["WEEK","MONTH","YEAR","DELAY","CATEGORY","CAUSE","MTN_NOTE","NOTE"]
 if not show_notes:

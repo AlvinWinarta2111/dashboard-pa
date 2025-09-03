@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+
+# Excel or data files (keep them out of the repo)
+*.xlsx
+*.xls
+*.csv
+
+# VSCode
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

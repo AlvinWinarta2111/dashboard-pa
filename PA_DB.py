@@ -4,19 +4,7 @@ import plotly.graph_objects as go
 import numpy as np
 
 st.set_page_config(page_title="Physical Availability - Data Delay Time", layout="wide")
-
-# Logo URL
-LOGO_URL = "https://raw.githubusercontent.com/AlvinWinarta2111/dashboard-pa/refs/heads/main/images/alamtri_logo.jpeg"
-
-# Layout for title and logo
-logo_col, title_col = st.columns([1, 6])
-
-with logo_col:
-    # Use st.image to display the logo
-    st.image(LOGO_URL, width=150)
-
-with title_col:
-    st.title("Physical Availability Dashboard — Data Delay Time")
+st.title("Physical Availability Dashboard — Data Delay Time")
 
 # -------------------------
 # Config
@@ -240,38 +228,36 @@ else:
     drilldown_df = filtered[filtered['CATEGORY'] == selected_category_drilldown].copy()
     total_drilldown_hours = drilldown_df['DELAY'].sum()
 
-    labels, values = [], []
+    labels, values = pd.Series(dtype='object'), pd.Series(dtype='float64')
     if selected_category_drilldown == "Maintenance":
         drilldown_df['MAINTENANCE_TYPE'] = np.where(drilldown_df['SCH_MTN'] != '', 'Scheduled', 'Unscheduled')
         breakdown_data = drilldown_df.groupby('MAINTENANCE_TYPE')['DELAY'].sum().reset_index()
-        labels = breakdown_data['MAINTENANCE_TYPE']
-        values = breakdown_data['DELAY']
+        if not breakdown_data.empty:
+            labels = breakdown_data['MAINTENANCE_TYPE']
+            values = breakdown_data['DELAY']
     else:
         breakdown_data = drilldown_df.groupby('CAUSE')['DELAY'].sum().reset_index()
-        labels = breakdown_data['CAUSE']
-        values = breakdown_data['DELAY']
+        if not breakdown_data.empty:
+            labels = breakdown_data['CAUSE']
+            values = breakdown_data['DELAY']
 
     left_drill_col, right_drill_col = st.columns([1, 2])
-    # This is inside the "Category Drill-Down" section
-with left_drill_col:
-    st.metric(
-        label=f"Total Hours for {selected_category_drilldown}",
-        value=f"{total_drilldown_hours:.2f} hrs"
-    )
-    
-    # Add breakdown if the category is Maintenance
-    if selected_category_drilldown == "Maintenance":
-        # Create a dictionary for easy lookup, e.g., {'Scheduled': 10.5, 'Unscheduled': 5.2}
-        hours_by_type = pd.Series(values.values, index=labels.values).to_dict()
-        scheduled_hours = hours_by_type.get('Scheduled', 0)
-        unscheduled_hours = hours_by_type.get('Unscheduled', 0)
+    with left_drill_col:
+        st.metric(label=f"Total Hours for {selected_category_drilldown}", value=f"{total_drilldown_hours:.2f} hrs")
         
-        st.markdown("---") # Visual separator
-        st.markdown(f"**Scheduled:** `{scheduled_hours:.2f} hrs`")
-        st.markdown(f"**Unscheduled:** `{unscheduled_hours:.2f} hrs`")
-    # --- END OF ADDED CODE ---
+        # Add breakdown if the category is Maintenance
+        if selected_category_drilldown == "Maintenance":
+            # Create a dictionary for easy lookup, e.g., {'Scheduled': 10.5, 'Unscheduled': 5.2}
+            hours_by_type = pd.Series(values.values, index=labels.values).to_dict()
+            scheduled_hours = hours_by_type.get('Scheduled', 0)
+            unscheduled_hours = hours_by_type.get('Unscheduled', 0)
+            
+            st.markdown("---") # Visual separator
+            st.markdown(f"**Scheduled:** `{scheduled_hours:.2f} hrs`")
+            st.markdown(f"**Unscheduled:** `{unscheduled_hours:.2f} hrs`")
+
     with right_drill_col:
-        if not breakdown_data.empty:
+        if not values.empty:
             fig_drilldown = go.Figure(data=[go.Pie(labels=labels, values=values, hole=0.4, textinfo="label+percent", hovertemplate="%{label}: %{value:.2f} hrs (%{percent})<extra></extra>")])
             fig_drilldown.update_layout(margin=dict(t=20, b=20, l=20, r=20), legend_orientation="h")
             st.plotly_chart(fig_drilldown, use_container_width=True)

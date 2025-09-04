@@ -127,8 +127,7 @@ def load_data_from_url():
 
     df["PERIOD_MONTH"] = df["MONTH"].astype(str) + " " + df["YEAR"].astype(str)
 
-    # Remove rows where all column values are identical to another row.
-    df = df.drop_duplicates()
+
     
     return df
 
@@ -264,9 +263,23 @@ else:
             scheduled_hours = hours_by_type.get('Scheduled', 0)
             unscheduled_hours = hours_by_type.get('Unscheduled', 0)
             
-            st.markdown("---") # Visual separator
-            st.markdown(f"**Scheduled:** `{scheduled_hours:.2f} hrs`")
-            st.markdown(f"**Unscheduled:** `{unscheduled_hours:.2f} hrs`")
+            # --- START OF RE-ADDED CODE ---
+            with st.container():
+                st.markdown(
+                    """
+                    <style>
+                    /* Target the specific container holding the Scheduled/Unscheduled breakdown */
+                    div[data-testid="stVerticalBlock"] > div > div > div > div > div.stMarkdown > strong:contains("Scheduled") {
+                        margin-top: -30px; /* Adjust this value as needed */
+                    }
+                    </style>
+                    """,
+                    unsafe_allow_html=True
+                )
+                st.markdown("---") # Visual separator
+                st.markdown(f"**Scheduled:** `{scheduled_hours:.2f} hrs`")
+                st.markdown(f"**Unscheduled:** `{unscheduled_hours:.2f} hrs`")
+            # --- END OF RE-ADDED CODE ---
 
     with right_drill_col:
         if not values.empty:

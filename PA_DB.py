@@ -138,14 +138,31 @@ months_available = df["PERIOD_MONTH"].dropna().unique().tolist()
 months_available.sort(key=lambda x: (int(x.split()[-1]), pd.to_datetime(x.split()[0], format='%b').month))
 selected_month = st.sidebar.selectbox("Month", options=["All"]+months_available, index=0)
 
-category_filter = st.sidebar.multiselect("Delay categories", options=sorted(df["CATEGORY"].unique().tolist()), default=sorted(df["CATEGORY"].unique().tolist()))
+# --- MODIFICATION START ---
+# Replace the multiselect with individual checkboxes
+st.sidebar.markdown("**Delay Categories**")
+all_categories = sorted(df["CATEGORY"].unique().tolist())
+selected_categories = []
+for category in all_categories:
+    # Create a checkbox for each category, checked by default
+    if st.sidebar.checkbox(category, value=True):
+        selected_categories.append(category)
+# --- MODIFICATION END ---
+
 show_notes = st.sidebar.checkbox("Show notes column in drill-down table", value=True)
 
+# Apply filters to the dataframe
 filtered = df.copy()
-if selected_month!="All":
-    filtered = filtered[filtered["PERIOD_MONTH"]==selected_month]
-if category_filter:
-    filtered = filtered[filtered["CATEGORY"].isin(category_filter)]
+if selected_month != "All":
+    filtered = filtered[filtered["PERIOD_MONTH"] == selected_month]
+
+# Use the new 'selected_categories' list for filtering
+if selected_categories:
+    filtered = filtered[filtered["CATEGORY"].isin(selected_categories)]
+else:
+    # If no categories are selected, show an empty table
+    st.warning("No delay categories selected. Please select at least one category to see data.")
+    filtered = filtered.iloc[0:0] # Create an empty dataframe to prevent errors
 
 # -------------------------
 # Aggregations

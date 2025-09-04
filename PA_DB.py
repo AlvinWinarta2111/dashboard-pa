@@ -131,6 +131,8 @@ def load_data_from_url():
         pass
 
     df["PERIOD_MONTH"] = df["MONTH"].astype(str) + " " + df["YEAR"].astype(str)
+    # This removes rows where all column values are identical to another row.
+    df = df.drop_duplicates()
 
     return df
 

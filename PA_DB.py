@@ -12,7 +12,7 @@ st.set_page_config(page_title="Physical Availability - Data Delay Time", layout=
 LOGO_URL = "https://raw.githubusercontent.com/AlvinWinarta2111/dashboard-pa/refs/heads/main/images/alamtri_logo.jpeg"
 
 # Layout for title and logo
-logo_col, title_col = st.columns([1, 6])
+logo_col, title_col = st.columns([1, 4])
 
 with logo_col:
     # Use st.image to display the logo

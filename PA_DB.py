@@ -271,8 +271,8 @@ with kpi_col:
 
     st.metric("Physical Availability (PA)", f"{PA:.1%}" if PA is not None else "N/A", delta=f"Target {pa_target:.0%}")
     st.metric("Maintenance Availability (MA)", f"{MA:.1%}" if MA is not None else "N/A", delta=f"Target {ma_target:.0%}")
-    st.metric("Total Delay Hours (filtered)", f"{total_delay:.2f} hrs")
-    st.metric("Available Time (sum)", f"{available_time:.2f} hrs" if available_time else "N/A")
+    st.metric("Total Delay Hours)", f"{total_delay:.2f} hrs")
+    st.metric("Total Available Time", f"{available_time:.2f} hrs" if available_time else "N/A")
 
 with donut1_col:
     st.subheader("Delay by Category")

@@ -289,7 +289,7 @@ with donut1_col:
         st.info("No category data available.")
 
 with donut2_col:
-    st.subheader("Scheduled vs Unscheduled (Maintenance only)")
+    st.subheader("By Maintenance")
     if "MTN_DELAY_TYPE" in filtered.columns:
         sched_data = filtered[filtered["MTN_DELAY_TYPE"].notna() & (filtered["MTN_DELAY_TYPE"] != "")].copy()
         # Remove blank/null mtn types

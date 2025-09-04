@@ -127,8 +127,6 @@ def load_data_from_url():
 
     df["PERIOD_MONTH"] = df["MONTH"].astype(str) + " " + df["YEAR"].astype(str)
 
-
-    
     return df
 
 # -------------------------
@@ -187,9 +185,9 @@ if not filtered.empty:
 else:
     agg = pd.DataFrame()
 
-# -------------------------
-# KPI cards + Donut chart
-# -------------------------
+# -----------------------------------------------
+# MODIFIED SECTION: KPI cards + Donut charts
+# -----------------------------------------------
 total_delay = filtered["DELAY"].sum()
 if "AVAILABLE_TIME_MONTH" in filtered.columns and filtered["AVAILABLE_TIME_MONTH"].notna().any():
     available_time = filtered.drop_duplicates("PERIOD_MONTH")["AVAILABLE_TIME_MONTH"].dropna().sum()
@@ -207,89 +205,57 @@ ma_target = float(ma_target_series[0]) if len(ma_target_series) > 0 else 0.85
 if pa_target > 1: pa_target /= 100.0
 if ma_target > 1: ma_target /= 100.0
 
-donut_data = filtered.groupby("CATEGORY")["DELAY"].sum().reset_index().sort_values("DELAY",ascending=False)
-donut_fig = go.Figure(data=[go.Pie(labels=donut_data["CATEGORY"], values=donut_data["DELAY"], hole=0.4, textinfo="label+percent", hovertemplate="%{label}: %{value:.2f} hrs<extra></extra>")])
-donut_fig.update_layout(margin=dict(t=20,b=20,l=20,r=20), legend_orientation="h")
+# Create a 3-column layout
+kpi_col, donut_col1, donut_col2 = st.columns([2, 3, 3])
 
-left_col, right_col = st.columns([2,3])
-with left_col:
+with kpi_col:
     st.subheader("Key KPIs")
     st.metric("Physical Availability (PA)", f"{PA:.1%}" if PA is not None else "N/A", delta=f"Target {pa_target:.0%}", delta_color="off")
     st.metric("Maintenance Availability (MA)", f"{MA:.1%}" if MA is not None else "N/A", delta=f"Target {ma_target:.0%}", delta_color="off")
     st.metric("Total Delay Hours (filtered)", f"{total_delay:.2f} hrs")
     st.metric("Available Time (sum)", f"{available_time:.2f} hrs" if available_time is not None else "N/A")
-with right_col:
+
+with donut_col1:
     st.subheader("Delay Breakdown (Overall)")
+    donut_data = filtered.groupby("CATEGORY")["DELAY"].sum().reset_index().sort_values("DELAY",ascending=False)
     if not donut_data.empty:
+        donut_fig = go.Figure(data=[go.Pie(labels=donut_data["CATEGORY"], values=donut_data["DELAY"], hole=0.4, textinfo="label+percent", hovertemplate="%{label}: %{value:.2f} hrs<extra></extra>")])
+        donut_fig.update_layout(margin=dict(t=20,b=20,l=20,r=20), legend_orientation="h")
         st.plotly_chart(donut_fig, use_container_width=True)
     else:
-        st.info("No delay data available for the selected filters.")
+        st.info("No delay data available.")
 
-st.markdown("---")
-
-# -------------------------
-# Category Drill-Down Donut
-# -------------------------
-st.subheader("Category Drill-Down")
-drill_down_categories = filtered['CATEGORY'].unique().tolist()
-if not drill_down_categories:
-    st.info("No data available to drill down.")
-else:
-    selected_category_drilldown = st.selectbox("Select a category to see its breakdown:", options=drill_down_categories)
-    drilldown_df = filtered[filtered['CATEGORY'] == selected_category_drilldown].copy()
-    total_drilldown_hours = drilldown_df['DELAY'].sum()
-
-    labels, values = pd.Series(dtype='object'), pd.Series(dtype='float64')
-    if selected_category_drilldown == "Maintenance":
-        drilldown_df['MAINTENANCE_TYPE'] = np.where(drilldown_df['SCH_MTN'] != '', 'Scheduled', 'Unscheduled')
-        breakdown_data = drilldown_df.groupby('MAINTENANCE_TYPE')['DELAY'].sum().reset_index()
-        if not breakdown_data.empty:
-            labels = breakdown_data['MAINTENANCE_TYPE']
-            values = breakdown_data['DELAY']
-    else:
-        breakdown_data = drilldown_df.groupby('CAUSE')['DELAY'].sum().reset_index()
-        if not breakdown_data.empty:
-            labels = breakdown_data['CAUSE']
-            values = breakdown_data['DELAY']
-
-    left_drill_col, right_drill_col = st.columns([1, 2])
-    with left_drill_col:
-        st.metric(label=f"Total Hours for {selected_category_drilldown}", value=f"{total_drilldown_hours:.2f} hrs")
+with donut_col2:
+    st.subheader("Maintenance Breakdown")
+    maintenance_df = filtered[filtered['CATEGORY'] == 'Maintenance'].copy()
+    if not maintenance_df.empty:
+        # Create Scheduled vs Unscheduled breakdown
+        maintenance_df['TYPE'] = np.where(maintenance_df['SCH_MTN'] != '', 'Scheduled', 'Unscheduled')
+        maintenance_breakdown = maintenance_df.groupby('TYPE')['DELAY'].sum().reset_index()
         
-        # Add breakdown if the category is Maintenance
-        if selected_category_drilldown == "Maintenance":
-            # Create a dictionary for easy lookup, e.g., {'Scheduled': 10.5, 'Unscheduled': 5.2}
-            hours_by_type = pd.Series(values.values, index=labels.values).to_dict()
-            scheduled_hours = hours_by_type.get('Scheduled', 0)
-            unscheduled_hours = hours_by_type.get('Unscheduled', 0)
-            
-            # --- START OF RE-ADDED CODE ---
-            with st.container():
-                st.markdown(
-                    """
-                    <style>
-                    /* Target the specific container holding the Scheduled/Unscheduled breakdown */
-                    div[data-testid="stVerticalBlock"] > div > div > div > div > div.stMarkdown > strong:contains("Scheduled") {
-                        margin-top: -30px; /* Adjust this value as needed */
-                    }
-                    </style>
-                    """,
-                    unsafe_allow_html=True
-                )
-                st.markdown("---") # Visual separator
-                st.markdown(f"**Scheduled:** `{scheduled_hours:.2f} hrs`")
-                st.markdown(f"**Unscheduled:** `{unscheduled_hours:.2f} hrs`")
-            # --- END OF RE-ADDED CODE ---
-
-    with right_drill_col:
-        if not values.empty:
-            fig_drilldown = go.Figure(data=[go.Pie(labels=labels, values=values, hole=0.4, textinfo="label+percent", hovertemplate="%{label}: %{value:.2f} hrs (%{percent})<extra></extra>")])
-            fig_drilldown.update_layout(margin=dict(t=20, b=20, l=20, r=20), legend_orientation="h")
-            st.plotly_chart(fig_drilldown, use_container_width=True)
-        else:
-            st.info(f"No breakdown data available for {selected_category_drilldown}.")
+        # Create the custom donut chart
+        fig_maint = go.Figure(data=[go.Pie(
+            labels=maintenance_breakdown['TYPE'],
+            values=maintenance_breakdown['DELAY'],
+            hole=0.4,
+            # Custom text template to show percentage and hours
+            texttemplate="%{label}<br>%{percent}<br>%{value:.2f} hrs",
+            textposition='inside',
+            hovertemplate="%{label}: %{value:.2f} hrs (%{percent})<extra></extra>"
+        )])
+        
+        # Update layout to hide the legend
+        fig_maint.update_layout(
+            margin=dict(t=20, b=20, l=20, r=20),
+            showlegend=False
+        )
+        st.plotly_chart(fig_maint, use_container_width=True)
+    else:
+        st.info("No Maintenance data to display.")
 
 st.markdown("---")
+
+# NOTE: The old "Category Drill-Down" section has been removed.
 
 # -------------------------
 # Trend Analysis

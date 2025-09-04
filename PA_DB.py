@@ -3,7 +3,19 @@ import pandas as pd
 import plotly.graph_objects as go
 
 st.set_page_config(page_title="Physical Availability - Data Delay Time", layout="wide")
-st.title("Physical Availability Dashboard — Data Delay Time")
+
+# Logo URL
+LOGO_URL = "https://raw.githubusercontent.com/AlvinWinarta2111/dashboard-pa/refs/heads/main/images/alamtri_logo.jpeg"
+
+# Layout for title and logo
+logo_col, title_col = st.columns([1, 6])
+
+with logo_col:
+    # Use st.image to display the logo
+    st.image(LOGO_URL, width=150)
+
+with title_col:
+    st.title("Physical Availability Dashboard — Data Delay Time")
 
 # -------------------------
 # Config

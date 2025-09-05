@@ -71,6 +71,7 @@ def load_data_from_url():
         "START": "START",
         "STOP": "STOP",
         "EQUIPMENT": "EQUIPMENT",
+        "EQ. DESC.": "EQ_DESC",
         "CATEGORY": "CATEGORY",
     }
     for orig, new in replacements.items():
@@ -126,7 +127,8 @@ def load_data_from_url():
             df["STOP"] = ""
 
     # Fill category-like columns (create if missing)
-    for cat in ["MTN_DELAY_TYPE","SCH_MTN","UNSCH_MTN","MINING_DELAY","WEATHER_DELAY","OTHER_DELAY","MTN_NOTE","NOTE","EQUIPMENT","CATEGORY"]:
+    # <-- ADDED "EQ_DESC" here so EQ description is filled and available downstream
+    for cat in ["MTN_DELAY_TYPE","SCH_MTN","UNSCH_MTN","MINING_DELAY","WEATHER_DELAY","OTHER_DELAY","MTN_NOTE","NOTE","EQ_DESC","EQUIPMENT","CATEGORY"]:
         if cat in df.columns:
             df[cat] = df[cat].fillna("").astype(str)
         else:
@@ -289,7 +291,7 @@ with donut1_col:
         st.info("No category data available.")
 
 with donut2_col:
-    st.subheader("By Maintenance")
+    st.subheader("Scheduled vs Unscheduled (Maintenance only)")
     if "MTN_DELAY_TYPE" in filtered.columns:
         sched_data = filtered[filtered["MTN_DELAY_TYPE"].notna() & (filtered["MTN_DELAY_TYPE"] != "")].copy()
         # Remove blank/null mtn types
@@ -382,8 +384,13 @@ st.subheader("Top Delay by Equipment (Pareto)")
 
 # Use EQUIPMENT if present; fallback to CAUSE
 if "EQUIPMENT" in filtered.columns and filtered["EQUIPMENT"].notna().any():
-    equipment_key = "EQUIPMENT"
-    equipment_series = filtered["EQUIPMENT"].replace("", "(Unknown)")
+    # Build an EQUIPMENT_DESC composite (EQUIPMENT + EQ_DESC) for clearer sub-component identification
+    if "EQ_DESC" in filtered.columns:
+        filtered["EQUIPMENT_DESC"] = filtered["EQUIPMENT"].replace("", "(Unknown)").astype(str) + " - " + filtered["EQ_DESC"].replace("", "(No Desc)").astype(str)
+    else:
+        filtered["EQUIPMENT_DESC"] = filtered["EQUIPMENT"].replace("", "(Unknown)").astype(str)
+    equipment_key = "EQUIPMENT_DESC"
+    equipment_series = filtered["EQUIPMENT_DESC"].replace("", "(Unknown)")
 else:
     equipment_key = "CAUSE"
     equipment_series = filtered["CAUSE"].replace("", "(Unknown)")
@@ -453,14 +460,17 @@ if selected_equipment:
     st.subheader(f"Drill-down: {selected_equipment}")
 
     # match the same equipment_key used above
-    if equipment_key == "EQUIPMENT":
+    if equipment_key == "EQUIPMENT_DESC":
+        selector = filtered["EQUIPMENT_DESC"].replace("", "(Unknown)") == selected_equipment
+    elif equipment_key == "EQUIPMENT":
         selector = filtered["EQUIPMENT"].replace("", "(Unknown)") == selected_equipment
     else:
         selector = filtered["CAUSE"].replace("", "(Unknown)") == selected_equipment
 
     details_df = filtered[selector].copy()
 
-    columns_needed = ["WEEK", "MONTH", "DELAY", "CATEGORY", "START", "STOP", "MTN_NOTE", "NOTE"]
+    # include EQUIPMENT and EQ_DESC so user sees sub-component description
+    columns_needed = ["WEEK", "MONTH", "DELAY", "CATEGORY", "EQUIPMENT", "EQ_DESC", "START", "STOP", "MTN_NOTE", "NOTE"]
     for col in columns_needed:
         if col not in details_df.columns:
             details_df[col] = ""

@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import datetime
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -15,7 +16,6 @@ LOGO_URL = "https://raw.githubusercontent.com/AlvinWinarta2111/dashboard-pa/refs
 logo_col, title_col = st.columns([1, 8])
 
 with logo_col:
-    # Use st.image to display the logo
     st.image(LOGO_URL, width=150)
 
 with title_col:
@@ -37,7 +37,7 @@ def load_data_from_url():
         st.error(f"Unable to read sheet 'Data Delay Time': {e}")
         return None
 
-    # Detect header row
+    # Detect header row (header starts in first 20 rows containing WEEK/MONTH/YEAR)
     header_row = None
     for i in range(20):
         row_values = raw.iloc[i].astype(str).str.upper().tolist()
@@ -49,9 +49,9 @@ def load_data_from_url():
         return None
 
     df = pd.read_excel(RAW_URL, sheet_name="Data Delay Time", header=header_row)
+    # normalize column names
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Normalize column names if present
     replacements = {
         "WEEK": "WEEK",
         "MONTH": "MONTH",
@@ -73,6 +73,8 @@ def load_data_from_url():
         "EQUIPMENT": "EQUIPMENT",
         "EQ. DESC.": "EQ_DESC",
         "CATEGORY": "CATEGORY",
+        "PERIOD_MONTH": "PERIOD_MONTH",
+        "DATE": "DATE",
     }
     for orig, new in replacements.items():
         for col in df.columns:
@@ -80,36 +82,31 @@ def load_data_from_url():
                 df.rename(columns={col: new}, inplace=True)
                 break
 
-    # Ensure essential columns
+    # Ensure minimal expected columns exist
     essential = ["WEEK", "MONTH", "YEAR", "DELAY"]
     for c in essential:
         if c not in df.columns:
             st.error(f"Expected column '{c}' not found after cleaning. Found columns: {df.columns.tolist()}")
             return None
 
-    # Convert numeric
+    # Numeric conversion where needed
     df["DELAY"] = pd.to_numeric(df["DELAY"], errors="coerce")
-
     if "AVAILABLE_TIME_MONTH" in df.columns:
         df["AVAILABLE_TIME_MONTH"] = pd.to_numeric(df["AVAILABLE_TIME_MONTH"], errors="coerce")
     else:
         df["AVAILABLE_TIME_MONTH"] = None
 
-    # Keep START/STOP as raw strings for display but compute durations
+    # Keep START/STOP as strings for display and compute AVAILABLE_HOURS (if both present)
     if "START" in df.columns and "STOP" in df.columns:
-        # Keep raw strings (clean)
         df["START"] = df["START"].astype(str).str.strip()
         df["STOP"] = df["STOP"].astype(str).str.strip()
 
-        import datetime
-
         def parse_time_to_hours(start_str, stop_str):
             try:
-                # Accept H:M or HH:MM formats; if seconds present, this still works
                 start_t = datetime.datetime.strptime(start_str, "%H:%M")
-                stop_t  = datetime.datetime.strptime(stop_str, "%H:%M")
+                stop_t = datetime.datetime.strptime(stop_str, "%H:%M")
                 diff = (stop_t - start_t).total_seconds() / 3600
-                if diff < 0:  # crossed midnight
+                if diff < 0:
                     diff += 24
                 return diff
             except Exception:
@@ -126,17 +123,40 @@ def load_data_from_url():
         if "STOP" not in df.columns:
             df["STOP"] = ""
 
-    # Fill category-like columns (create if missing)
-    # <-- ADDED "EQ_DESC" here so EQ description is filled and available downstream
-    for cat in ["MTN_DELAY_TYPE","SCH_MTN","UNSCH_MTN","MINING_DELAY","WEATHER_DELAY","OTHER_DELAY","MTN_NOTE","NOTE","EQ_DESC","EQUIPMENT","CATEGORY"]:
+    # Ensure presence of helpful columns and cast to string where appropriate
+    for cat in ["MTN_DELAY_TYPE", "SCH_MTN", "UNSCH_MTN", "MINING_DELAY", "WEATHER_DELAY", "OTHER_DELAY", "MTN_NOTE", "NOTE", "EQ_DESC", "EQUIPMENT", "CATEGORY", "PERIOD_MONTH", "DATE"]:
         if cat in df.columns:
-            df[cat] = df[cat].fillna("").astype(str)
+            # keep raw text, strip whitespace
+            df[cat] = df[cat].fillna("").astype(str).str.strip()
         else:
             df[cat] = ""
 
-    # Create CATEGORY if absent or incomplete (prefer MTN / Mining / Weather / Other)
+    # ---------------------
+    # SUB_CATEGORY detection (Scheduled / Unscheduled) - robust
+    # ---------------------
+    def detect_subcat_row(r):
+        mt = str(r.get("MTN_DELAY_TYPE", "")).strip().lower()
+        sch = str(r.get("SCH_MTN", "")).strip().lower()
+        unsch = str(r.get("UNSCH_MTN", "")).strip().lower()
+
+        # Explicit "unscheduled" wins
+        if mt == "unscheduled" or mt.startswith("uns") or unsch not in ("", "nan", "none"):
+            return "Unscheduled"
+
+        # Explicit "scheduled" wins
+        if mt == "scheduled" or mt.startswith("sch") or sch not in ("", "nan", "none"):
+            return "Scheduled"
+
+        # Nothing matched → leave blank
+        return ""
+
+    df["SUB_CATEGORY"] = df.apply(detect_subcat_row, axis=1)
+
+    # ---------------------
+    # CATEGORY determination — Maintenance when SUB_CATEGORY set
+    # ---------------------
     def determine_category(r):
-        if r.get("MTN_DELAY_TYPE") and str(r.get("MTN_DELAY_TYPE")).strip() != "":
+        if r.get("SUB_CATEGORY") in ("Scheduled", "Unscheduled"):
             return "Maintenance"
         if r.get("MINING_DELAY") and str(r.get("MINING_DELAY")).strip() != "":
             return "Mining"
@@ -144,43 +164,59 @@ def load_data_from_url():
             return "Weather"
         if r.get("OTHER_DELAY") and str(r.get("OTHER_DELAY")).strip() != "":
             return "Other"
-        # keep existing CATEGORY if provided otherwise Unknown
         if r.get("CATEGORY") and str(r.get("CATEGORY")).strip() not in ("", "nan"):
             return str(r.get("CATEGORY")).strip()
         return "Unknown"
 
     df["CATEGORY"] = df.apply(determine_category, axis=1)
 
-    # Compose a CAUSE column (useful for pareto when equipment not present)
+    # Compose CAUSE for pareto fallback
     def compose_cause(r):
         parts = []
-        for c in ["MTN_DELAY_TYPE","SCH_MTN","UNSCH_MTN","MINING_DELAY","WEATHER_DELAY","OTHER_DELAY","MTN_NOTE","NOTE"]:
+        for c in ["MTN_DELAY_TYPE", "SCH_MTN", "UNSCH_MTN", "MINING_DELAY", "WEATHER_DELAY", "OTHER_DELAY", "MTN_NOTE", "NOTE"]:
             v = r.get(c)
             if v is not None:
                 vs = str(v).strip()
                 if vs and vs.lower() != "nan":
                     parts.append(vs)
         return " | ".join(parts)
+
     df["CAUSE"] = df.apply(compose_cause, axis=1)
 
-    # YEAR/WEEK normalization (numeric)
+    # YEAR/WEEK numeric normalization
     df["YEAR"] = pd.to_numeric(df["YEAR"], errors="coerce").astype("Int64")
     df["WEEK"] = pd.to_numeric(df["WEEK"], errors="coerce").astype("Int64")
 
-    # Add PERIOD_MONTH if missing
-    if "PERIOD_MONTH" not in df.columns and "MONTH" in df.columns and "YEAR" in df.columns:
-        df["PERIOD_MONTH"] = df["MONTH"].astype(str).str.strip() + " " + df["YEAR"].astype(str)
+    # Add PERIOD_MONTH if missing using MONTH + YEAR (keep MONTH as original 3-letter)
+    if "PERIOD_MONTH" not in df.columns or df["PERIOD_MONTH"].isnull().all() or (df["PERIOD_MONTH"].astype(str).str.strip()=="" ).all():
+        if "MONTH" in df.columns and "YEAR" in df.columns:
+            df["PERIOD_MONTH"] = df["MONTH"].astype(str).str.strip() + " " + df["YEAR"].astype(str)
 
-    # Drop invalid DELAY rows
+    # trim
+    if "PERIOD_MONTH" in df.columns:
+        df["PERIOD_MONTH"] = df["PERIOD_MONTH"].astype(str).str.strip()
+
+    # drop rows with no DELAY numeric
     df = df[df["DELAY"].notna()].copy()
 
-    # Bruteforce: remove years before 2024
+    # remove years before 2024
     if "YEAR" in df.columns:
         df = df[df["YEAR"].notna() & (df["YEAR"] >= 2024)]
 
-    # Ensure PERIOD_MONTH values are trimmed
-    if "PERIOD_MONTH" in df.columns:
-        df["PERIOD_MONTH"] = df["PERIOD_MONTH"].astype(str).str.strip()
+    # Prepare EQUIPMENT_DESC composite
+    if "EQUIPMENT" in df.columns and df["EQUIPMENT"].notna().any():
+        df["EQUIPMENT_DESC"] = df["EQUIPMENT"].replace("", "(Unknown)").astype(str) + " - " + df["EQ_DESC"].replace("", "(No Desc)").astype(str)
+    else:
+        df["EQUIPMENT_DESC"] = df["CAUSE"].replace("", "(Unknown)").astype(str)
+
+    # DATE: keep as string (YYYY-MM-DD) if possible
+    if "DATE" in df.columns:
+        try:
+            df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce").dt.date.astype("object").fillna("").astype(str)
+        except Exception:
+            df["DATE"] = df["DATE"].astype(str).replace("nan", "")
+    else:
+        df["DATE"] = ""
 
     return df
 
@@ -195,38 +231,78 @@ if df is None:
 # Sidebar Filters
 # -------------------------
 st.sidebar.header("Filters & Options")
-granularity = st.sidebar.selectbox("Time granularity", options=["WEEK","PERIOD_MONTH"], index=1)
+granularity = st.sidebar.selectbox("Time granularity", options=["WEEK", "PERIOD_MONTH"], index=1)
 
-# Build month list and sort chronologically using parsed dates
-if "PERIOD_MONTH" in df.columns:
-    period_dt = pd.to_datetime(df["PERIOD_MONTH"], format="%b %Y", errors="coerce")
-    months_df = pd.DataFrame({"PERIOD_MONTH": df["PERIOD_MONTH"], "period_dt": period_dt})
-    months_available = (
-        months_df.dropna(subset=["period_dt"]).drop_duplicates("PERIOD_MONTH").sort_values("period_dt")["PERIOD_MONTH"].tolist()
-    )
-    # include any unparsable months at end (unique)
-    unparsable = [x for x in df["PERIOD_MONTH"].unique().tolist() if x not in months_available and pd.isna(pd.to_datetime(x, format="%b %Y", errors="coerce"))]
-    months_available += unparsable
+# Build month list and sort chronologically using MONTH + YEAR (keep "JAN 2024" strings as-is)
+months_available = []
+if "MONTH" in df.columns and "YEAR" in df.columns:
+    month_to_idx = {
+        "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+        "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12
+    }
+    tmp = []
+    for _, r in df.iterrows():
+        m = str(r.get("MONTH", "")).strip()
+        if m == "":
+            continue
+        y = r.get("YEAR")
+        if pd.isna(y):
+            continue
+        try:
+            y_int = int(y)
+        except Exception:
+            continue
+        m_upper = m.upper()
+        if m_upper not in month_to_idx:
+            continue
+        tmp.append((y_int, month_to_idx[m_upper], f"{m_upper} {y_int}"))
+    # sort chronologically and deduplicate while preserving order
+    tmp_sorted = sorted(set(tmp), key=lambda x: (x[0], x[1]))
+    months_available = [t[2] for t in tmp_sorted]
+
+# If PERIOD_MONTH already present as strings (maybe different casing), ensure we include them too but keep canonical "MON YYYY".
+# We'll use months_available above; if it's empty but PERIOD_MONTH exists, fallback to unique PERIOD_MONTH.
+if not months_available and "PERIOD_MONTH" in df.columns:
+    months_available = pd.Series(df["PERIOD_MONTH"].unique()).dropna().astype(str).str.strip().tolist()
+
+# Default to latest available month if exists
+if months_available:
+    # latest by sorting the month tuples
+    last = months_available[-1]
+    try:
+        default_idx = len(months_available) - 1
+    except Exception:
+        default_idx = 0
 else:
-    months_available = []
+    default_idx = 0
 
-selected_month = st.sidebar.selectbox("Month", options=["All"] + months_available, index=0)
+selected_month = st.sidebar.selectbox("MONTH", months, index=0)
 
 filtered = df.copy()
 if selected_month != "All" and selected_month != "":
+    # match exact PERIOD_MONTH strings (they are in "JAN 2024" format)
     filtered = filtered[filtered["PERIOD_MONTH"] == selected_month]
 
 # -------------------------
-# KPI Calculations
+# KPI Calculations (compute BEFORE applying category drilldown)
 # -------------------------
 total_delay = filtered["DELAY"].sum()
 
-if "AVAILABLE_TIME_MONTH" in filtered.columns and filtered["AVAILABLE_TIME_MONTH"].notna().any():
-    available_time = filtered.drop_duplicates("PERIOD_MONTH")["AVAILABLE_TIME_MONTH"].dropna().sum()
-elif "AVAILABLE_HOURS" in filtered.columns and filtered["AVAILABLE_HOURS"].notna().any():
-    per_period_avail = filtered.groupby("PERIOD_MONTH")["AVAILABLE_HOURS"].max().dropna()
-    available_time = per_period_avail.sum()
-else:
+# AVAILABLE_TIME aggregation: robust approach — max per PERIOD_MONTH then sum
+available_time = None
+try:
+    if "AVAILABLE_TIME_MONTH" in filtered.columns and filtered["AVAILABLE_TIME_MONTH"].notna().any():
+        available_time = (
+            filtered.groupby("PERIOD_MONTH", dropna=True)["AVAILABLE_TIME_MONTH"]
+            .max()
+            .dropna()
+            .sum()
+        )
+    elif "AVAILABLE_HOURS" in filtered.columns and filtered["AVAILABLE_HOURS"].notna().any():
+        available_time = filtered.groupby("PERIOD_MONTH", dropna=True)["AVAILABLE_HOURS"].max().dropna().sum()
+    else:
+        available_time = None
+except Exception:
     available_time = None
 
 PA = max(0, 1 - total_delay / available_time) if (available_time and available_time > 0) else None
@@ -237,16 +313,51 @@ pa_target = filtered["PA_TARGET"].dropna().unique().tolist() if "PA_TARGET" in f
 ma_target = filtered["MA_TARGET"].dropna().unique().tolist() if "MA_TARGET" in filtered.columns else []
 pa_target = pa_target[0] if pa_target else 0.9
 ma_target = ma_target[0] if ma_target else 0.85
-if pa_target > 1: pa_target = pa_target / 100.0
-if ma_target > 1: ma_target = ma_target / 100.0
+if isinstance(pa_target, (int, float)) and pa_target > 1:
+    pa_target = pa_target / 100.0
+if isinstance(ma_target, (int, float)) and ma_target > 1:
+    ma_target = ma_target / 100.0
 
 # -------------------------
-# Top Row: KPIs + Donuts (Delay by Category restored)
+# Year-to-date (YTD) calculations
+# -------------------------
+ytd_PA = ytd_MA = None
+ytd_total_delay = None
+try:
+    latest_filtered = filtered if not filtered.empty else df
+    if not latest_filtered.empty:
+        latest_year = int(latest_filtered["YEAR"].dropna().max())
+        period_dt_all = pd.to_datetime(latest_filtered["PERIOD_MONTH"], format="%b %Y", errors="coerce")
+        if period_dt_all.notna().any():
+            latest_period_dt = period_dt_all.max()
+            df_period_dt = pd.to_datetime(df["PERIOD_MONTH"], format="%b %Y", errors="coerce")
+            ytd_df = df[(df["YEAR"] == latest_year) & (df_period_dt <= latest_period_dt)]
+        else:
+            ytd_df = df[df["YEAR"] == latest_year]
+        ytd_total_delay = ytd_df["DELAY"].sum()
+        if "AVAILABLE_TIME_MONTH" in ytd_df.columns and ytd_df["AVAILABLE_TIME_MONTH"].notna().any():
+            ytd_available_time = ytd_df.groupby("PERIOD_MONTH")["AVAILABLE_TIME_MONTH"].max().dropna().sum()
+        elif "AVAILABLE_HOURS" in ytd_df.columns and ytd_df["AVAILABLE_HOURS"].notna().any():
+            ytd_available_time = ytd_df.groupby("PERIOD_MONTH")["AVAILABLE_HOURS"].max().dropna().sum()
+        else:
+            ytd_available_time = None
+        if ytd_available_time and ytd_available_time > 0:
+            ytd_PA = max(0, 1 - ytd_total_delay / ytd_available_time)
+            ytd_maintenance_delay = ytd_df[ytd_df["CATEGORY"] == "Maintenance"]["DELAY"].sum()
+            ytd_MA = max(0, 1 - ytd_maintenance_delay / ytd_available_time)
+        else:
+            ytd_PA = None
+            ytd_MA = None
+except Exception:
+    ytd_PA = ytd_MA = None
+    ytd_total_delay = None
+
+# -------------------------
+# Top Row: KPIs + Donuts
 # -------------------------
 kpi_col, donut1_col, donut2_col = st.columns([1,2,2])
 with kpi_col:
     st.subheader("Key KPIs")
-    # Build a readable date range for caption using PERIOD_MONTH if possible
     min_caption = None
     max_caption = None
     if "PERIOD_MONTH" in filtered.columns and not filtered["PERIOD_MONTH"].dropna().empty:
@@ -256,29 +367,30 @@ with kpi_col:
             max_dt = parsed.max()
             if pd.notna(min_dt) and pd.notna(max_dt):
                 min_caption = min_dt.strftime("%d/%m/%Y")
-                # last day of max month:
-                max_month_end = (max_dt + pd.offsets.MonthEnd(0)).strftime("%d/%m/%Y")
-                max_caption = max_month_end
-    # fallback to YEAR range if PERIOD_MONTH not parsable
+                max_caption = (max_dt + pd.offsets.MonthEnd(0)).strftime("%d/%m/%Y")
     if min_caption is None and "YEAR" in filtered.columns and filtered["YEAR"].notna().any():
         min_y = int(filtered["YEAR"].min())
         max_y = int(filtered["YEAR"].max())
         min_caption = f"01/01/{min_y}"
         max_caption = f"31/12/{max_y}"
 
-    if min_caption and max_caption:
-        st.caption(f"Data obtained from {min_caption} to {max_caption}")
-    else:
-        st.caption("Data obtained from unknown date range")
+    st.caption(f"Data obtained from {min_caption} to {max_caption}" if min_caption and max_caption else "Data obtained from unknown date range")
 
+    # Show monthly (current filter) KPIs
     st.metric("Physical Availability (PA)", f"{PA:.1%}" if PA is not None else "N/A", delta=f"Target {pa_target:.0%}")
     st.metric("Maintenance Availability (MA)", f"{MA:.1%}" if MA is not None else "N/A", delta=f"Target {ma_target:.0%}")
-    st.metric("Total Delay Hours", f"{total_delay:.2f} hrs")
-    st.metric("Total Available Time", f"{available_time:.2f} hrs" if available_time else "N/A")
+    st.metric("Total Delay Hours (selected)", f"{total_delay:.2f} hrs")
+    st.metric("Total Available Time (selected)", f"{available_time:.2f} hrs" if available_time else "N/A")
+
+    # YTD row
+    if ytd_PA is not None:
+        st.write("")  # spacing
+        st.caption(f"YTD (up to selected): PA {ytd_PA:.1%} | MA {ytd_MA:.1%} | Delay {ytd_total_delay:.2f} hrs")
+    else:
+        st.write("")
 
 with donut1_col:
     st.subheader("Delay by Category")
-    # Use CATEGORY created above
     if "CATEGORY" in filtered.columns:
         donut_data = filtered.groupby("CATEGORY", dropna=False)["DELAY"].sum().reset_index().sort_values("DELAY", ascending=False)
         if not donut_data.empty:
@@ -293,16 +405,17 @@ with donut1_col:
 with donut2_col:
     st.subheader("Scheduled vs Unscheduled (Maintenance only)")
     if "MTN_DELAY_TYPE" in filtered.columns:
-        sched_data = filtered[filtered["MTN_DELAY_TYPE"].notna() & (filtered["MTN_DELAY_TYPE"] != "")].copy()
-        # Remove blank/null mtn types
-        sched_data = sched_data[sched_data["MTN_DELAY_TYPE"].str.strip() != ""]
-        if not sched_data.empty:
-            sched_donut = sched_data.groupby("MTN_DELAY_TYPE")["DELAY"].sum().reset_index().sort_values("DELAY", ascending=False)
-            donut_fig2 = go.Figure(data=[go.Pie(labels=sched_donut["MTN_DELAY_TYPE"], values=sched_donut["DELAY"], hole=0.4, textinfo="label+percent", hovertemplate="%{label}: %{value:.2f} hrs<extra></extra>")])
-            donut_fig2.update_layout(margin=dict(t=20,b=20,l=20,r=20))
-            st.plotly_chart(donut_fig2, use_container_width=True)
+        maint_df = filtered[filtered["CATEGORY"] == "Maintenance"].copy()
+        if not maint_df.empty:
+            sched_donut = maint_df.groupby("SUB_CATEGORY")["DELAY"].sum().reset_index().sort_values("DELAY", ascending=False)
+            if not sched_donut.empty:
+                donut_fig2 = go.Figure(data=[go.Pie(labels=sched_donut["SUB_CATEGORY"], values=sched_donut["DELAY"], hole=0.4, textinfo="label+percent", hovertemplate="%{label}: %{value:.2f} hrs<extra></extra>")])
+                donut_fig2.update_layout(margin=dict(t=20,b=20,l=20,r=20))
+                st.plotly_chart(donut_fig2, use_container_width=True)
+            else:
+                st.info("No maintenance breakdown available.")
         else:
-            st.info("No maintenance breakdown available.")
+            st.info("No maintenance data found in selection.")
     else:
         st.info("No MTN_DELAY_TYPE column available.")
 
@@ -312,38 +425,31 @@ st.markdown("---")
 # Trend Analysis
 # -------------------------
 st.subheader("Trend: Total Delay Hours vs PA%")
-
 group_field = granularity
 
 if group_field == "WEEK":
-    # Group by YEAR+WEEK and ensure chronological sorting by YEAR then WEEK
     trend = filtered.groupby(["YEAR","WEEK"], dropna=False).agg(
         total_delay_hours=("DELAY","sum"),
         available_time_month=("AVAILABLE_TIME_MONTH","max"),
         available_hours=("AVAILABLE_HOURS","max")
     ).reset_index()
-    # create readable label
     trend["period_label"] = trend["YEAR"].astype(str) + " W" + trend["WEEK"].astype("Int64").astype(str)
     trend = trend.sort_values(by=["YEAR","WEEK"])
     x_field = "period_label"
 elif group_field == "PERIOD_MONTH":
-    # Group by PERIOD_MONTH but sort using parsed month-year
     trend = filtered.groupby("PERIOD_MONTH", dropna=False).agg(
         total_delay_hours=("DELAY","sum"),
         available_time_month=("AVAILABLE_TIME_MONTH","max"),
         available_hours=("AVAILABLE_HOURS","max")
     ).reset_index()
-    # parse PERIOD_MONTH to datetime for sorting (e.g. "Jan 2024")
+    # parse PERIOD_MONTH strings (format "JAN 2024") for sorting, but keep labels as strings
     trend["period_dt"] = pd.to_datetime(trend["PERIOD_MONTH"], format="%b %Y", errors="coerce")
-    # if parsing fails for some entries, they will sort last
     trend = trend.sort_values(by=["period_dt", "PERIOD_MONTH"])
     x_field = "PERIOD_MONTH"
 else:
-    # fallback
     trend = filtered.groupby(group_field).agg(total_delay_hours=("DELAY","sum"), available_time_month=("AVAILABLE_TIME_MONTH","max"), available_hours=("AVAILABLE_HOURS","max")).reset_index()
     x_field = group_field
 
-# compute PA% per period
 trend["PA_pct"] = None
 trend["available_for_pa"] = None
 for idx, row in trend.iterrows():
@@ -382,13 +488,7 @@ st.markdown("---")
 # -------------------------
 st.subheader("Top Delay by Equipment (Pareto)")
 
-# Use EQUIPMENT if present; fallback to CAUSE
-if "EQUIPMENT" in filtered.columns and filtered["EQUIPMENT"].notna().any():
-    # Build an EQUIPMENT_DESC composite (EQUIPMENT + EQ_DESC) for clearer sub-component identification
-    if "EQ_DESC" in filtered.columns:
-        filtered["EQUIPMENT_DESC"] = filtered["EQUIPMENT"].replace("", "(Unknown)").astype(str) + " - " + filtered["EQ_DESC"].replace("", "(No Desc)").astype(str)
-    else:
-        filtered["EQUIPMENT_DESC"] = filtered["EQUIPMENT"].replace("", "(Unknown)").astype(str)
+if "EQUIPMENT_DESC" in filtered.columns and filtered["EQUIPMENT_DESC"].notna().any():
     equipment_key = "EQUIPMENT_DESC"
     equipment_series = filtered["EQUIPMENT_DESC"].replace("", "(Unknown)")
 else:
@@ -420,83 +520,89 @@ fig_pareto.update_yaxes(title_text="Cumulative %", tickformat="%", range=[0, 1],
 st.plotly_chart(fig_pareto, use_container_width=True)
 
 # -------------------------
-# AgGrid: Top Equipment Table
+# CATEGORY FILTER (below Pareto) -> directly drives Drilldown
 # -------------------------
-st.subheader("Details for Top Equipment")
+st.subheader("Filter by Delay Category (affects drilldown table)")
 
-equip_summary = pareto_df[[equipment_key, "hours"]].rename(columns={"hours": "Total Delay Hours"})
-equip_summary = equip_summary.sort_values("Total Delay Hours", ascending=False).reset_index(drop=True)
+category_options = [
+    "MAINTENANCE (ALL)",
+    "MAINTENANCE - SCHEDULED",
+    "MAINTENANCE - UNSCHEDULED",
+    "MINING DELAY",
+    "WEATHER DELAY",
+    "OTHER DELAY",
+]
+selected_category = st.selectbox("Select delay category", category_options, index=0)
 
-gob = GridOptionsBuilder.from_dataframe(equip_summary)
-gob.configure_selection(selection_mode="single", use_checkbox=True)
-gob.configure_grid_options(pagination=False)  # no pagination
-gob.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
-grid_options = gob.build()
+if selected_category == "MAINTENANCE (ALL)":
+    drill_df_base = filtered[filtered["CATEGORY"] == "Maintenance"].copy()
+elif selected_category == "MAINTENANCE - SCHEDULED":
+    drill_df_base = filtered[(filtered["CATEGORY"] == "Maintenance") & (filtered["SUB_CATEGORY"] == "Scheduled")].copy()
+elif selected_category == "MAINTENANCE - UNSCHEDULED":
+    drill_df_base = filtered[(filtered["CATEGORY"] == "Maintenance") & (filtered["SUB_CATEGORY"] == "Unscheduled")].copy()
+elif selected_category == "MINING DELAY":
+    drill_df_base = filtered[filtered["CATEGORY"] == "Mining"].copy()
+elif selected_category == "WEATHER DELAY":
+    drill_df_base = filtered[filtered["CATEGORY"] == "Weather"].copy()
+elif selected_category == "OTHER DELAY":
+    drill_df_base = filtered[filtered["CATEGORY"] == "Other"].copy()
+else:
+    drill_df_base = filtered.copy()
 
-grid_resp = AgGrid(
-    equip_summary,
-    gridOptions=grid_options,
-    update_mode=GridUpdateMode.SELECTION_CHANGED,
+# -------------------------
+# Drill-down table (directly showing rows for the selected category)
+# -------------------------
+st.subheader("Drill-down data (filtered by selected category)")
+
+details_df = drill_df_base.copy()
+
+# Ensure required columns exist
+required_cols = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "EQ_DESC", "DELAY", "NOTE", "SUB_CATEGORY", "YEAR"]
+for c in required_cols:
+    if c not in details_df.columns:
+        details_df[c] = ""
+
+# Prepare output DataFrame
+details_out = details_df[["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "EQ_DESC", "DELAY", "NOTE", "SUB_CATEGORY", "YEAR"]].copy()
+
+# Rename EQ_DESC -> Equipment Description for display
+details_out = details_out.rename(columns={"EQ_DESC": "Equipment Description"})
+
+# Reorder columns depending on category selection
+if selected_category == "MAINTENANCE (ALL)":
+    ordered = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "SUB_CATEGORY", "Equipment Description", "DELAY", "NOTE"]
+else:
+    ordered = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "Equipment Description", "DELAY", "NOTE"]
+
+# Some columns may not exist (safeguard)
+ordered = [c for c in ordered if c in details_out.columns]
+
+# Convert WEEK to numeric for stable sorting
+details_out["WEEK"] = pd.to_numeric(details_out["WEEK"], errors="coerce")
+
+# Sort by YEAR, WEEK, START if YEAR exists, else by WEEK, START
+if "YEAR" in details_out.columns and details_out["YEAR"].notna().any():
+    details_out["YEAR"] = pd.to_numeric(details_out["YEAR"], errors="coerce")
+    details_out = details_out.sort_values(by=["YEAR", "WEEK", "START"], ascending=[True, True, True]).reset_index(drop=True)
+    details_out = details_out.drop(columns=["YEAR"], errors="ignore")
+else:
+    details_out = details_out.sort_values(by=["WEEK", "START"], ascending=[True, True]).reset_index(drop=True)
+
+# Only keep ordered columns for display
+details_out = details_out[ordered].reset_index(drop=True)
+
+# Show using AgGrid (no pagination, scrollable)
+gob2 = GridOptionsBuilder.from_dataframe(details_out)
+gob2.configure_grid_options(pagination=False)
+gob2.configure_default_column(editable=False, sortable=True, filter=True, resizable=True, wrapText=True, autoHeight=True)
+grid_options2 = gob2.build()
+
+AgGrid(
+    details_out,
+    gridOptions=grid_options2,
+    update_mode=GridUpdateMode.NO_UPDATE,
     allow_unsafe_jscode=False,
-    height=400,
+    height=600,
     fit_columns_on_grid_load=True,
     theme="balham"
 )
-
-selected_rows = grid_resp.get("selected_rows", [])
-
-# Safe handling: AgGrid may return list-of-dicts
-selected_equipment = None
-if isinstance(selected_rows, list) and len(selected_rows) > 0:
-    selected_equipment = selected_rows[0].get(equipment_key, None)
-elif isinstance(selected_rows, pd.DataFrame) and not selected_rows.empty:
-    selected_equipment = selected_rows.iloc[0].get(equipment_key, None)
-
-# -------------------------
-# Drill-down table (for chosen equipment/cause)
-# -------------------------
-if selected_equipment:
-    st.markdown("---")
-    st.subheader(f"Drill-down: {selected_equipment}")
-
-    # match the same equipment_key used above
-    if equipment_key == "EQUIPMENT_DESC":
-        selector = filtered["EQUIPMENT_DESC"].replace("", "(Unknown)") == selected_equipment
-    elif equipment_key == "EQUIPMENT":
-        selector = filtered["EQUIPMENT"].replace("", "(Unknown)") == selected_equipment
-    else:
-        selector = filtered["CAUSE"].replace("", "(Unknown)") == selected_equipment
-
-    details_df = filtered[selector].copy()
-
-    # include EQUIPMENT and EQ_DESC so user sees sub-component description
-    columns_needed = ["WEEK", "MONTH", "DELAY", "CATEGORY", "EQUIPMENT", "EQ_DESC", "START", "STOP", "MTN_NOTE", "NOTE"]
-    for col in columns_needed:
-        if col not in details_df.columns:
-            details_df[col] = ""
-
-    # sort by YEAR then WEEK, then START (start is string so it's stable)
-    details_df["WEEK"] = pd.to_numeric(details_df["WEEK"], errors="coerce")
-    if "YEAR" in details_df.columns and details_df["YEAR"].notna().any():
-        details_df = details_df.sort_values(by=["YEAR", "WEEK", "START"], ascending=[True, True, True])
-    else:
-        details_df = details_df.sort_values(by=["WEEK", "START"], ascending=[True, True])
-
-    # display START/STOP as raw strings (they were kept as strings)
-    details_out = details_df[columns_needed].copy().reset_index(drop=True)
-
-    # Show using AgGrid (no pagination)
-    gob2 = GridOptionsBuilder.from_dataframe(details_out)
-    gob2.configure_grid_options(pagination=False)
-    gob2.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
-    grid_options2 = gob2.build()
-
-    AgGrid(
-        details_out,
-        gridOptions=grid_options2,
-        update_mode=GridUpdateMode.NO_UPDATE,
-        allow_unsafe_jscode=False,
-        height=400,
-        fit_columns_on_grid_load=True,
-        theme="balham"
-    )

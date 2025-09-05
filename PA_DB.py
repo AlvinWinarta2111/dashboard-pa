@@ -275,7 +275,8 @@ if months_available:
         default_idx = 0
 else:
     default_idx = 0
-
+    
+months = ["All"] + months_available
 selected_month = st.sidebar.selectbox("MONTH", months, index=0)
 
 filtered = df.copy()

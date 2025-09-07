@@ -415,8 +415,8 @@ with kpi_col:
     st.caption(f"Data obtained from {min_caption} to {max_caption}" if min_caption and max_caption else "Data obtained from unknown date range")
 
     # Show monthly (current filter) KPIs
-    st.metric("Physical Availability (PA)", f"{PA:.2%}" if PA is not None else "N/A", delta=f"Target {pa_target:.0%}")
-    st.metric("Mechanical Availability (MA)", f"{MA:.2%}" if MA is not None else "N/A", delta=f"Target {ma_target:.0%}")
+    st.metric("Physical Availability (PA)", f"{PA:.2%}" if PA is not None else "N/A", delta=f"Target {pa_target:.2%}")
+    st.metric("Mechanical Availability (MA)", f"{MA:.2%}" if MA is not None else "N/A", delta=f"Target {ma_target:.2%}")
     st.metric("Total Delay Hours (selected)", f"{total_delay:.2f} hrs")
     st.metric("Total Available Time (selected)", f"{available_time:.2f} hrs" if available_time else "N/A")
 
@@ -432,6 +432,8 @@ with donut1_col:
     if "CATEGORY" in filtered.columns:
         donut_data = filtered.groupby("CATEGORY", dropna=False)["DELAY"].sum().reset_index().sort_values("DELAY", ascending=False)
         if not donut_data.empty:
+            # round values for display
+            donut_data["DELAY"] = donut_data["DELAY"].round(2)
             donut_fig = go.Figure(data=[go.Pie(labels=donut_data["CATEGORY"], values=donut_data["DELAY"], hole=0.4, textinfo="label+percent", hovertemplate="%{label}: %{value:.2f} hrs<extra></extra>")])
             donut_fig.update_layout(margin=dict(t=20,b=20,l=20,r=20))
             st.plotly_chart(donut_fig, use_container_width=True)
@@ -447,6 +449,8 @@ with donut2_col:
         if not maint_df.empty:
             sched_donut = maint_df.groupby("SUB_CATEGORY")["DELAY"].sum().reset_index().sort_values("DELAY", ascending=False)
             if not sched_donut.empty:
+                # round values for display
+                sched_donut["DELAY"] = sched_donut["DELAY"].round(2)
                 donut_fig2 = go.Figure(data=[go.Pie(labels=sched_donut["SUB_CATEGORY"], values=sched_donut["DELAY"], hole=0.4, textinfo="label+percent", hovertemplate="%{label}: %{value:.2f} hrs<extra></extra>")])
                 donut_fig2.update_layout(margin=dict(t=20,b=20,l=20,r=20))
                 st.plotly_chart(donut_fig2, use_container_width=True)
@@ -506,7 +510,7 @@ for idx, row in trend.iterrows():
 # ---------- UPDATED: swap visuals & coloring ----------
 # Convert PA_pct to numeric and round to 2 decimals for plotting
 trend["PA_pct"] = pd.to_numeric(trend["PA_pct"], errors="coerce")
-trend["PA_pct_rounded"] = trend["PA_pct"].round(2)
+trend["PA_pct_rounded"] = trend["PA_pct"].round(4)  # keep fractional precision; axis formatting will show 2 decimal percent
 trend["total_delay_hours"] = pd.to_numeric(trend["total_delay_hours"], errors="coerce")
 trend["total_delay_hours_rounded"] = trend["total_delay_hours"].round(2)
 
@@ -522,18 +526,35 @@ for v in trend["PA_pct_rounded"]:
         colors.append("green")
 
 fig_trend = go.Figure()
-# Bar = PA%
-fig_trend.add_trace(go.Bar(x=trend[x_field], y=trend["PA_pct_rounded"], name="PA%", marker=dict(color=colors)))
+# Bar = PA% (bar values are fractions; tickformat will render as percent with 2 decimals)
+fig_trend.add_trace(
+    go.Bar(
+        x=trend[x_field],
+        y=trend["PA_pct_rounded"],
+        name="PA%",
+        marker=dict(color=colors),
+        hovertemplate="%{y:.2%}<extra></extra>"
+    )
+)
 # Line = Delay hours (secondary y)
-fig_trend.add_trace(go.Scatter(x=trend[x_field], y=trend["total_delay_hours_rounded"], name="Total Delay Hours", yaxis="y2", mode="lines+markers"))
+fig_trend.add_trace(
+    go.Scatter(
+        x=trend[x_field],
+        y=trend["total_delay_hours_rounded"],
+        name="Total Delay Hours",
+        yaxis="y2",
+        mode="lines+markers",
+        hovertemplate="%{y:.2f} hrs<extra></extra>"
+    )
+)
 
 # Draw PA target line on the PA% axis (left)
 fig_trend.add_shape(type="line", x0=0, x1=1, xref="paper", y0=pa_target, y1=pa_target, yref="y", line=dict(color="green", dash="dash"))
-fig_trend.add_annotation(x=0, xref="paper", y=pa_target, yref="y", showarrow=False, text=f"PA Target {pa_target:.0%}", font=dict(color="green"), align="left", xanchor="left", yanchor="bottom")
+fig_trend.add_annotation(x=0, xref="paper", y=pa_target, yref="y", showarrow=False, text=f"PA Target {pa_target:.2%}", font=dict(color="green"), align="left", xanchor="left", yanchor="bottom")
 
 fig_trend.update_layout(
     xaxis_title="Period",
-    yaxis=dict(title="PA%", overlaying=None, side="left", tickformat="%", range=[0,1]),
+    yaxis=dict(title="PA%", overlaying=None, side="left", tickformat=".2%", range=[0,1]),
     yaxis2=dict(title="Delay Hours", overlaying="y", side="right"),
     legend=dict(orientation="h"),
     margin=dict(t=30)
@@ -571,11 +592,22 @@ top_n = st.slider("Top N equipment to show", min_value=5, max_value=50, value=15
 pareto_df = equipment_agg.head(top_n)
 
 fig_pareto = make_subplots(specs=[[{"secondary_y": True}]])
-# round values for display only
+# round values for display
 fig_pareto.add_trace(go.Bar(x=pareto_df[equipment_key], y=pareto_df["hours"].round(2), name="Hours"), secondary_y=False)
-fig_pareto.add_trace(go.Scatter(x=pareto_df[equipment_key], y=pareto_df["cum_pct"].round(2), name="Cumulative %", mode="lines+markers"), secondary_y=True)
+# cumulative trace: plot fractions; axis tickformat set to percent with 2 decimals
+fig_pareto.add_trace(
+    go.Scatter(
+        x=pareto_df[equipment_key],
+        y=pareto_df["cum_pct"],  # keep fractional precision; axis formatting controls display
+        name="Cumulative %",
+        mode="lines+markers",
+        hovertemplate="%{y:.2%}<extra></extra>"
+    ),
+    secondary_y=True
+)
 fig_pareto.update_layout(xaxis_tickangle=-45, yaxis_title="Hours", legend=dict(orientation="h"), margin=dict(t=30))
-fig_pareto.update_yaxes(title_text="Cumulative %", tickformat="%", range=[0, 1], secondary_y=True)
+fig_pareto.update_yaxes(title_text="Cumulative %", tickformat=".2%", range=[0, 1], secondary_y=True)
+fig_pareto.update_yaxes(title_text="Delay Hours", secondary_y=False)
 
 st.plotly_chart(fig_pareto, use_container_width=True)
 

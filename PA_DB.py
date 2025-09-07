@@ -284,14 +284,11 @@ def load_data_from_url():
     df["WEEK_START"] = df.apply(_compute_week_start, axis=1)
 
     # ---------- (NEW) assign each ISO-week to the month containing the week end (latest month of that week) ----------
-    # This ensures a week that spans two months is assigned to the later month (week end).
     try:
         week_start_dt = pd.to_datetime(df["WEEK_START"], errors="coerce")
         week_end_dt = week_start_dt + pd.Timedelta(days=6)
-        # Only assign when week_start exists; otherwise keep existing PERIOD_MONTH
         df.loc[week_start_dt.notna(), "PERIOD_MONTH"] = week_end_dt.dt.strftime("%b %Y")
     except Exception:
-        # if anything fails, keep original PERIOD_MONTH values (safe fallback)
         pass
 
     return df
@@ -309,9 +306,20 @@ if df is None:
 st.sidebar.header("Filters & Options")
 granularity = st.sidebar.selectbox("Time granularity", options=["WEEK", "PERIOD_MONTH"], index=1)
 
-# Build month list and sort chronologically using MONTH + YEAR (keep "JAN 2024" strings as-is)
+# -------------------------
+# Build month list from PERIOD_MONTH (chronologically) — this fixes mismatch when weeks were reassigned to later month
+# -------------------------
 months_available = []
-if "MONTH" in df.columns and "YEAR" in df.columns:
+if "PERIOD_MONTH" in df.columns:
+    unique_pm = pd.Series(df["PERIOD_MONTH"].dropna().astype(str).str.strip().unique())
+    # try to parse them to datetime for sorting
+    parsed = pd.to_datetime(unique_pm, format="%b %Y", errors="coerce")
+    if parsed.notna().any():
+        months_df = pd.DataFrame({"PERIOD_MONTH": unique_pm.values, "period_dt": parsed.values})
+        months_df = months_df.sort_values("period_dt")
+        months_available = months_df["PERIOD_MONTH"].tolist()
+# fallback to previous MONTH+YEAR logic if PERIOD_MONTH parsing failed
+if not months_available and "MONTH" in df.columns and "YEAR" in df.columns:
     month_to_idx = {
         "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
         "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12
@@ -332,19 +340,11 @@ if "MONTH" in df.columns and "YEAR" in df.columns:
         if m_upper not in month_to_idx:
             continue
         tmp.append((y_int, month_to_idx[m_upper], f"{m_upper} {y_int}"))
-    # sort chronologically and deduplicate while preserving order
     tmp_sorted = sorted(set(tmp), key=lambda x: (x[0], x[1]))
     months_available = [t[2] for t in tmp_sorted]
 
-# If PERIOD_MONTH already present as strings (maybe different casing), ensure we include them too but keep canonical "MON YYYY".
-# We'll use months_available above; if it's empty but PERIOD_MONTH exists, fallback to unique PERIOD_MONTH.
-if not months_available and "PERIOD_MONTH" in df.columns:
-    months_available = pd.Series(df["PERIOD_MONTH"].unique()).dropna().astype(str).str.strip().tolist()
-
 # Default to latest available month if exists
 if months_available:
-    # latest by sorting the month tuples
-    last = months_available[-1]
     try:
         default_idx = len(months_available) - 1
     except Exception:
@@ -510,37 +510,29 @@ group_field = granularity
 
 # ---------- (UPDATED) Use GLOBAL latest week for 52-week cutoff ----------
 if group_field == "WEEK":
-    # compute global latest_week_start from the entire dataset (df)
     latest_week_start_global = df["WEEK_START"].dropna().max() if "WEEK_START" in df.columns else pd.NaT
     if pd.isna(latest_week_start_global):
-        # fallback: use filtered dataset as a last resort
         latest_week_start = filtered["WEEK_START"].dropna().max() if "WEEK_START" in filtered.columns else pd.NaT
     else:
         latest_week_start = latest_week_start_global
 
     if pd.isna(latest_week_start):
-        # no reliable week info → no 52-week limiting
         filtered_for_trend = filtered.copy()
     else:
         cutoff_date = latest_week_start - datetime.timedelta(weeks=51)
-        # apply global cutoff but still honor current filtered subset (month/category, etc.)
         filtered_for_trend = filtered[filtered["WEEK_START"].notna() & (pd.to_datetime(filtered["WEEK_START"]) >= pd.to_datetime(cutoff_date))].copy()
-        # fallback to original filtered if this yields nothing
         if filtered_for_trend.empty:
             filtered_for_trend = filtered.copy()
 else:
     filtered_for_trend = filtered.copy()
 
-# Now build trend using filtered_for_trend when grouping by WEEK
 if group_field == "WEEK":
     trend = filtered_for_trend.groupby(["YEAR","WEEK"], dropna=False).agg(
         total_delay_hours=("DELAY","sum"),
         available_time_month=("AVAILABLE_TIME_MONTH","max"),
         available_hours=("AVAILABLE_HOURS","max")
     ).reset_index()
-    # keep label as "YEAR W<week>"
     trend["period_label"] = trend["YEAR"].astype(str) + " W" + trend["WEEK"].astype("Int64").astype(str)
-    # compute week_start for trend rows to sort chronologically (use safe try)
     def _week_start_from_row(r):
         try:
             return datetime.date.fromisocalendar(int(r["YEAR"]), int(r["WEEK"]), 1)
@@ -556,7 +548,6 @@ elif group_field == "PERIOD_MONTH":
         available_time_month=("AVAILABLE_TIME_MONTH","max"),
         available_hours=("AVAILABLE_HOURS","max")
     ).reset_index()
-    # parse PERIOD_MONTH strings (format "JAN 2024") for sorting, but keep labels as strings
     trend["period_dt"] = pd.to_datetime(trend["PERIOD_MONTH"], format="%b %Y", errors="coerce")
     trend = trend.sort_values(by=["period_dt", "PERIOD_MONTH"])
     x_field = "PERIOD_MONTH"
@@ -580,13 +571,11 @@ for idx, row in trend.iterrows():
         trend.at[idx,"PA_pct"] = max(0, 1 - row["total_delay_hours"] / avail)
 
 # ---------- swap visuals & coloring (PA bars, Delay line) ----------
-# Convert PA_pct to numeric and round for plotting
 trend["PA_pct"] = pd.to_numeric(trend["PA_pct"], errors="coerce")
 trend["PA_pct_rounded"] = trend["PA_pct"].round(4)
 trend["total_delay_hours"] = pd.to_numeric(trend["total_delay_hours"], errors="coerce")
 trend["total_delay_hours_rounded"] = trend["total_delay_hours"].round(2)
 
-# Color rule: PA below target -> red, PA >= target -> green
 pa_threshold = pa_target if (pa_target is not None) else 0.9
 colors = []
 for v in trend["PA_pct_rounded"]:
@@ -598,7 +587,6 @@ for v in trend["PA_pct_rounded"]:
         colors.append("green")
 
 fig_trend = go.Figure()
-# Bar = PA% (bar values are fractions; tickformat will render as percent with 2 decimals)
 fig_trend.add_trace(
     go.Bar(
         x=trend[x_field],
@@ -608,7 +596,6 @@ fig_trend.add_trace(
         hovertemplate="%{y:.2%}<extra></extra>"
     )
 )
-# Line = Delay hours (secondary y)
 fig_trend.add_trace(
     go.Scatter(
         x=trend[x_field],
@@ -620,7 +607,6 @@ fig_trend.add_trace(
     )
 )
 
-# Draw PA target line on the PA% axis (left)
 fig_trend.add_shape(type="line", x0=0, x1=1, xref="paper", y0=pa_target, y1=pa_target, yref="y", line=dict(color="green", dash="dash"))
 fig_trend.add_annotation(x=0, xref="paper", y=pa_target, yref="y", showarrow=False, text=f"PA Target {pa_target:.2%}", font=dict(color="green"), align="left", xanchor="left", yanchor="bottom")
 
@@ -628,9 +614,8 @@ fig_trend.update_layout(
     xaxis_title="Period",
     yaxis=dict(title="PA%", overlaying=None, side="left", tickformat=".2%", range=[0,1]),
     yaxis2=dict(title="Delay Hours", overlaying="y", side="right"),
-    # place legend centered above the plotting area (under the chart title)
     legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02, yanchor="bottom"),
-    margin=dict(t=70)  # extra top margin to make room for title + legend
+    margin=dict(t=70)
 )
 st.plotly_chart(fig_trend, use_container_width=True)
 
@@ -665,9 +650,7 @@ top_n = st.slider("Top N equipment to show", min_value=5, max_value=50, value=15
 pareto_df = equipment_agg.head(top_n)
 
 fig_pareto = make_subplots(specs=[[{"secondary_y": True}]])
-# round values for display
 fig_pareto.add_trace(go.Bar(x=pareto_df[equipment_key], y=pareto_df["hours"].round(2), name="Hours"), secondary_y=False)
-# cumulative trace: keep fractional precision and let axis formatting show percent with 2 decimals
 fig_pareto.add_trace(
     go.Scatter(
         x=pareto_df[equipment_key],
@@ -678,7 +661,6 @@ fig_pareto.add_trace(
     ),
     secondary_y=True
 )
-# place legend centered above the pareto chart (so it doesn't overlap equipment names)
 fig_pareto.update_layout(xaxis_tickangle=-45, yaxis_title="Hours", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.15, yanchor="bottom"), margin=dict(t=110))
 fig_pareto.update_yaxes(title_text="Cumulative %", tickformat=".2%", range=[0, 1], secondary_y=True)
 fig_pareto.update_yaxes(title_text="Delay Hours", secondary_y=False)
@@ -721,6 +703,11 @@ else:
 st.subheader("Drill-down data (filtered by selected category)")
 
 details_df = drill_df_base.copy()
+
+# -------- (UPDATED) show assigned month in drilldown: use PERIOD_MONTH when available --------
+if "PERIOD_MONTH" in details_df.columns:
+    # overwrite MONTH for display so week -> latest month assignment is visible in the table
+    details_df["MONTH"] = details_df["PERIOD_MONTH"]
 
 # Ensure required columns exist
 required_cols = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "EQ_DESC", "DELAY", "NOTE", "SUB_CATEGORY", "YEAR"]

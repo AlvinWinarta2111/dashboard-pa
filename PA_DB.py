@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import datetime
+from datetime import timedelta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -225,7 +226,7 @@ def load_data_from_url():
     df["WEEK"] = pd.to_numeric(df["WEEK"], errors="coerce").astype("Int64")
 
     # Add PERIOD_MONTH if missing using MONTH + YEAR (keep MONTH as original 3-letter)
-    if "PERIOD_MONTH" not in df.columns or df["PERIOD_MONTH"].isnull().all() or (df["PERIOD_MONTH"].astype(str).str.strip()=="" ).all():
+    if "PERIOD_MONTH" not in df.columns or df["PERIOD_MONTH"].isnull().all() or (df["PERIOD_MONTH"].astype(str).str.strip()=="").all():
         if "MONTH" in df.columns and "YEAR" in df.columns:
             df["PERIOD_MONTH"] = df["MONTH"].astype(str).str.strip() + " " + df["YEAR"].astype(str)
 
@@ -236,9 +237,9 @@ def load_data_from_url():
     # drop rows with no DELAY numeric
     df = df[df["DELAY"].notna()].copy()
 
-    # remove years before 2024
+    # ---------- (CHANGE) allow data from 2023 onwards ----------
     if "YEAR" in df.columns:
-        df = df[df["YEAR"].notna() & (df["YEAR"] >= 2024)]
+        df = df[df["YEAR"].notna() & (df["YEAR"] >= 2023)]
 
     # Prepare EQUIPMENT_DESC composite
     if "EQUIPMENT" in df.columns and df["EQUIPMENT"].notna().any():
@@ -254,6 +255,44 @@ def load_data_from_url():
             df["DATE"] = df["DATE"].astype(str).replace("nan", "")
     else:
         df["DATE"] = ""
+
+    # ---------- (NEW) compute WEEK_START (ISO week Monday) to support accurate 52-week limiting ----------
+    def _compute_week_start(r):
+        # try YEAR+WEEK first
+        try:
+            y = r.get("YEAR")
+            w = r.get("WEEK")
+            if pd.notna(y) and pd.notna(w):
+                y_i = int(y)
+                w_i = int(w)
+                try:
+                    return datetime.date.fromisocalendar(y_i, w_i, 1)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # fallback to DATE column if available
+        try:
+            d = pd.to_datetime(r.get("DATE"), errors="coerce")
+            if pd.notna(d):
+                iso = d.isocalendar()
+                return datetime.date.fromisocalendar(int(iso.year), int(iso.week), 1)
+        except Exception:
+            pass
+        return pd.NaT
+
+    df["WEEK_START"] = df.apply(_compute_week_start, axis=1)
+
+    # ---------- (NEW) assign each ISO-week to the month containing the week end (latest month of that week) ----------
+    # This ensures a week that spans two months is assigned to the later month (week end).
+    try:
+        week_start_dt = pd.to_datetime(df["WEEK_START"], errors="coerce")
+        week_end_dt = week_start_dt + pd.Timedelta(days=6)
+        # Only assign when week_start exists; otherwise keep existing PERIOD_MONTH
+        df.loc[week_start_dt.notna(), "PERIOD_MONTH"] = week_end_dt.dt.strftime("%b %Y")
+    except Exception:
+        # if anything fails, keep original PERIOD_MONTH values (safe fallback)
+        pass
 
     return df
 
@@ -312,7 +351,7 @@ if months_available:
         default_idx = 0
 else:
     default_idx = 0
-    
+
 months = ["All"] + months_available
 selected_month = st.sidebar.selectbox("MONTH", months, index=0)
 
@@ -469,15 +508,48 @@ st.markdown("---")
 st.subheader("Trend: Total Delay Hours vs PA%")
 group_field = granularity
 
+# ---------- (UPDATED) Use GLOBAL latest week for 52-week cutoff ----------
 if group_field == "WEEK":
-    trend = filtered.groupby(["YEAR","WEEK"], dropna=False).agg(
+    # compute global latest_week_start from the entire dataset (df)
+    latest_week_start_global = df["WEEK_START"].dropna().max() if "WEEK_START" in df.columns else pd.NaT
+    if pd.isna(latest_week_start_global):
+        # fallback: use filtered dataset as a last resort
+        latest_week_start = filtered["WEEK_START"].dropna().max() if "WEEK_START" in filtered.columns else pd.NaT
+    else:
+        latest_week_start = latest_week_start_global
+
+    if pd.isna(latest_week_start):
+        # no reliable week info → no 52-week limiting
+        filtered_for_trend = filtered.copy()
+    else:
+        cutoff_date = latest_week_start - datetime.timedelta(weeks=51)
+        # apply global cutoff but still honor current filtered subset (month/category, etc.)
+        filtered_for_trend = filtered[filtered["WEEK_START"].notna() & (pd.to_datetime(filtered["WEEK_START"]) >= pd.to_datetime(cutoff_date))].copy()
+        # fallback to original filtered if this yields nothing
+        if filtered_for_trend.empty:
+            filtered_for_trend = filtered.copy()
+else:
+    filtered_for_trend = filtered.copy()
+
+# Now build trend using filtered_for_trend when grouping by WEEK
+if group_field == "WEEK":
+    trend = filtered_for_trend.groupby(["YEAR","WEEK"], dropna=False).agg(
         total_delay_hours=("DELAY","sum"),
         available_time_month=("AVAILABLE_TIME_MONTH","max"),
         available_hours=("AVAILABLE_HOURS","max")
     ).reset_index()
+    # keep label as "YEAR W<week>"
     trend["period_label"] = trend["YEAR"].astype(str) + " W" + trend["WEEK"].astype("Int64").astype(str)
-    trend = trend.sort_values(by=["YEAR","WEEK"])
+    # compute week_start for trend rows to sort chronologically (use safe try)
+    def _week_start_from_row(r):
+        try:
+            return datetime.date.fromisocalendar(int(r["YEAR"]), int(r["WEEK"]), 1)
+        except Exception:
+            return pd.NaT
+    trend["week_start"] = trend.apply(_week_start_from_row, axis=1)
+    trend = trend.sort_values(by=["week_start"])
     x_field = "period_label"
+
 elif group_field == "PERIOD_MONTH":
     trend = filtered.groupby("PERIOD_MONTH", dropna=False).agg(
         total_delay_hours=("DELAY","sum"),
@@ -507,15 +579,15 @@ for idx, row in trend.iterrows():
     if avail and avail > 0:
         trend.at[idx,"PA_pct"] = max(0, 1 - row["total_delay_hours"] / avail)
 
-# ---------- UPDATED: swap visuals & coloring ----------
-# Convert PA_pct to numeric and round to 2 decimals for plotting
+# ---------- swap visuals & coloring (PA bars, Delay line) ----------
+# Convert PA_pct to numeric and round for plotting
 trend["PA_pct"] = pd.to_numeric(trend["PA_pct"], errors="coerce")
-trend["PA_pct_rounded"] = trend["PA_pct"].round(4)  # keep fractional precision; axis formatting will show 2 decimal percent
+trend["PA_pct_rounded"] = trend["PA_pct"].round(4)
 trend["total_delay_hours"] = pd.to_numeric(trend["total_delay_hours"], errors="coerce")
 trend["total_delay_hours_rounded"] = trend["total_delay_hours"].round(2)
 
-# Color rule: PA below 90% -> red, PA >= 90% -> green (PA is fraction, so 0.9 == 90%)
-pa_threshold = 0.9
+# Color rule: PA below target -> red, PA >= target -> green
+pa_threshold = pa_target if (pa_target is not None) else 0.9
 colors = []
 for v in trend["PA_pct_rounded"]:
     if pd.isna(v):
@@ -556,8 +628,9 @@ fig_trend.update_layout(
     xaxis_title="Period",
     yaxis=dict(title="PA%", overlaying=None, side="left", tickformat=".2%", range=[0,1]),
     yaxis2=dict(title="Delay Hours", overlaying="y", side="right"),
-    legend=dict(orientation="h"),
-    margin=dict(t=30)
+    # place legend centered above the plotting area (under the chart title)
+    legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02, yanchor="bottom"),
+    margin=dict(t=70)  # extra top margin to make room for title + legend
 )
 st.plotly_chart(fig_trend, use_container_width=True)
 
@@ -594,18 +667,19 @@ pareto_df = equipment_agg.head(top_n)
 fig_pareto = make_subplots(specs=[[{"secondary_y": True}]])
 # round values for display
 fig_pareto.add_trace(go.Bar(x=pareto_df[equipment_key], y=pareto_df["hours"].round(2), name="Hours"), secondary_y=False)
-# cumulative trace: plot fractions; axis tickformat set to percent with 2 decimals
+# cumulative trace: keep fractional precision and let axis formatting show percent with 2 decimals
 fig_pareto.add_trace(
     go.Scatter(
         x=pareto_df[equipment_key],
-        y=pareto_df["cum_pct"],  # keep fractional precision; axis formatting controls display
+        y=pareto_df["cum_pct"],
         name="Cumulative %",
         mode="lines+markers",
         hovertemplate="%{y:.2%}<extra></extra>"
     ),
     secondary_y=True
 )
-fig_pareto.update_layout(xaxis_tickangle=-45, yaxis_title="Hours", legend=dict(orientation="h"), margin=dict(t=30))
+# place legend centered above the pareto chart (so it doesn't overlap equipment names)
+fig_pareto.update_layout(xaxis_tickangle=-45, yaxis_title="Hours", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.15, yanchor="bottom"), margin=dict(t=110))
 fig_pareto.update_yaxes(title_text="Cumulative %", tickformat=".2%", range=[0, 1], secondary_y=True)
 fig_pareto.update_yaxes(title_text="Delay Hours", secondary_y=False)
 

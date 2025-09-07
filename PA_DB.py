@@ -9,6 +9,43 @@ from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 
 st.set_page_config(page_title="Physical Availability - Data Delay Time", layout="wide")
 
+# -------------------------
+# Auto-hide sidebar after 10 seconds of no interaction
+# -------------------------
+st.markdown(
+    """
+    <script>
+    (function() {
+        let timer;
+        function showSidebar() {
+            try {
+                const sb = window.parent.document.querySelector('[data-testid="stSidebar"]');
+                if (sb) sb.style.display = 'block';
+            } catch(e) {}
+        }
+        function hideSidebar() {
+            try {
+                const sb = window.parent.document.querySelector('[data-testid="stSidebar"]');
+                if (sb) sb.style.display = 'none';
+            } catch(e) {}
+        }
+        function resetTimer() {
+            showSidebar();
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(hideSidebar, 10000);
+        }
+        // Reset timer on common user interactions:
+        ['mousemove','mousedown','keydown','touchstart','scroll'].forEach(evt => {
+            document.addEventListener(evt, resetTimer, {passive:true});
+        });
+        // also start on load
+        window.addEventListener('load', resetTimer);
+    })();
+    </script>
+    """,
+    unsafe_allow_html=True,
+)
+
 # Logo URL
 LOGO_URL = "https://raw.githubusercontent.com/AlvinWinarta2111/dashboard-pa/refs/heads/main/images/alamtri_logo.jpeg"
 
@@ -378,15 +415,15 @@ with kpi_col:
     st.caption(f"Data obtained from {min_caption} to {max_caption}" if min_caption and max_caption else "Data obtained from unknown date range")
 
     # Show monthly (current filter) KPIs
-    st.metric("Physical Availability (PA)", f"{PA:.1%}" if PA is not None else "N/A", delta=f"Target {pa_target:.0%}")
-    st.metric("Maintenance Availability (MA)", f"{MA:.1%}" if MA is not None else "N/A", delta=f"Target {ma_target:.0%}")
+    st.metric("Physical Availability (PA)", f"{PA:.2%}" if PA is not None else "N/A", delta=f"Target {pa_target:.0%}")
+    st.metric("Mechanical Availability (MA)", f"{MA:.2%}" if MA is not None else "N/A", delta=f"Target {ma_target:.0%}")
     st.metric("Total Delay Hours (selected)", f"{total_delay:.2f} hrs")
     st.metric("Total Available Time (selected)", f"{available_time:.2f} hrs" if available_time else "N/A")
 
     # YTD row
     if ytd_PA is not None:
         st.write("")  # spacing
-        st.caption(f"YTD (up to selected): PA {ytd_PA:.1%} | MA {ytd_MA:.1%} | Delay {ytd_total_delay:.2f} hrs")
+        st.caption(f"YTD (up to selected): PA {ytd_PA:.2%} | MA {ytd_MA:.2%} | Delay {ytd_total_delay:.2f} hrs")
     else:
         st.write("")
 
@@ -466,17 +503,38 @@ for idx, row in trend.iterrows():
     if avail and avail > 0:
         trend.at[idx,"PA_pct"] = max(0, 1 - row["total_delay_hours"] / avail)
 
-fig_trend = go.Figure()
-fig_trend.add_trace(go.Bar(x=trend[x_field], y=trend["total_delay_hours"], name="Total Delay Hours"))
-fig_trend.add_trace(go.Scatter(x=trend[x_field], y=trend["PA_pct"], name="PA%", yaxis="y2", mode="lines+markers"))
+# ---------- UPDATED: swap visuals & coloring ----------
+# Convert PA_pct to numeric and round to 2 decimals for plotting
+trend["PA_pct"] = pd.to_numeric(trend["PA_pct"], errors="coerce")
+trend["PA_pct_rounded"] = trend["PA_pct"].round(2)
+trend["total_delay_hours"] = pd.to_numeric(trend["total_delay_hours"], errors="coerce")
+trend["total_delay_hours_rounded"] = trend["total_delay_hours"].round(2)
 
-fig_trend.add_shape(type="line", x0=0, x1=1, xref="paper", y0=pa_target, y1=pa_target, yref="y2", line=dict(color="green", dash="dash"))
-fig_trend.add_annotation(x=0, xref="paper", y=pa_target, yref="y2", showarrow=False, text=f"PA Target {pa_target:.0%}", font=dict(color="green"), align="left", xanchor="left", yanchor="bottom")
+# Color rule: PA below 90% -> red, PA >= 90% -> green (PA is fraction, so 0.9 == 90%)
+pa_threshold = 0.9
+colors = []
+for v in trend["PA_pct_rounded"]:
+    if pd.isna(v):
+        colors.append("lightgrey")
+    elif v < pa_threshold:
+        colors.append("red")
+    else:
+        colors.append("green")
+
+fig_trend = go.Figure()
+# Bar = PA%
+fig_trend.add_trace(go.Bar(x=trend[x_field], y=trend["PA_pct_rounded"], name="PA%", marker=dict(color=colors)))
+# Line = Delay hours (secondary y)
+fig_trend.add_trace(go.Scatter(x=trend[x_field], y=trend["total_delay_hours_rounded"], name="Total Delay Hours", yaxis="y2", mode="lines+markers"))
+
+# Draw PA target line on the PA% axis (left)
+fig_trend.add_shape(type="line", x0=0, x1=1, xref="paper", y0=pa_target, y1=pa_target, yref="y", line=dict(color="green", dash="dash"))
+fig_trend.add_annotation(x=0, xref="paper", y=pa_target, yref="y", showarrow=False, text=f"PA Target {pa_target:.0%}", font=dict(color="green"), align="left", xanchor="left", yanchor="bottom")
 
 fig_trend.update_layout(
     xaxis_title="Period",
-    yaxis_title="Delay Hours",
-    yaxis2=dict(title="PA%", overlaying="y", side="right", tickformat="%", range=[0,1]),
+    yaxis=dict(title="PA%", overlaying=None, side="left", tickformat="%", range=[0,1]),
+    yaxis2=dict(title="Delay Hours", overlaying="y", side="right"),
     legend=dict(orientation="h"),
     margin=dict(t=30)
 )
@@ -513,8 +571,9 @@ top_n = st.slider("Top N equipment to show", min_value=5, max_value=50, value=15
 pareto_df = equipment_agg.head(top_n)
 
 fig_pareto = make_subplots(specs=[[{"secondary_y": True}]])
-fig_pareto.add_trace(go.Bar(x=pareto_df[equipment_key], y=pareto_df["hours"], name="Hours"), secondary_y=False)
-fig_pareto.add_trace(go.Scatter(x=pareto_df[equipment_key], y=pareto_df["cum_pct"], name="Cumulative %", mode="lines+markers"), secondary_y=True)
+# round values for display only
+fig_pareto.add_trace(go.Bar(x=pareto_df[equipment_key], y=pareto_df["hours"].round(2), name="Hours"), secondary_y=False)
+fig_pareto.add_trace(go.Scatter(x=pareto_df[equipment_key], y=pareto_df["cum_pct"].round(2), name="Cumulative %", mode="lines+markers"), secondary_y=True)
 fig_pareto.update_layout(xaxis_tickangle=-45, yaxis_title="Hours", legend=dict(orientation="h"), margin=dict(t=30))
 fig_pareto.update_yaxes(title_text="Cumulative %", tickformat="%", range=[0, 1], secondary_y=True)
 
@@ -591,6 +650,19 @@ else:
 
 # Only keep ordered columns for display
 details_out = details_out[ordered].reset_index(drop=True)
+
+# ---------- ROUND DELAY column to 2 decimals for display ----------
+def _round_maybe(x):
+    try:
+        if x is None or (isinstance(x, str) and str(x).strip() == ""):
+            return x
+        xf = float(x)
+        return round(xf, 2)
+    except Exception:
+        return x
+
+if "DELAY" in details_out.columns:
+    details_out["DELAY"] = details_out["DELAY"].apply(_round_maybe)
 
 # Show using AgGrid (no pagination, scrollable)
 gob2 = GridOptionsBuilder.from_dataframe(details_out)

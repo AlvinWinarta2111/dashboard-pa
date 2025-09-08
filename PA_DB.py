@@ -301,15 +301,16 @@ if df is None:
     st.stop()
 
 # -------------------------
-# NEW: compute MTBF & MTTR from "Data Operational" sheet (COUNT = total rows)
+# NEW: compute MTBF & MTTR trends from "Data Operational" sheet (weekly & monthly)
 # -------------------------
 @st.cache_data(ttl=600)
-def compute_mtbf_mttr_from_url(raw_url):
+def compute_mt_trends_from_workbook(raw_url):
     """
-    Reads the 'Data Operational' sheet (case-insensitive search) from the workbook at raw_url,
-    parses OPERATIONAL HOURS into decimal hours and sums MAINTENANCE DELAY.
-    Uses COUNT = total number of rows in the Data Operational sheet as denominator.
-    Returns a dict with results and detected column names.
+    Read 'Data Operational' sheet and compute weekly & monthly MTBF / MTTR series.
+    MTBF_hours = (sum of operational hours in period) / (count of maintenance rows in period)
+    MTTR_hours = (sum of maintenance delay in period) / (count of maintenance rows in period)
+    Uses COUNT = total number of rows in period (per your instruction).
+    Returns dict with weekly_df, monthly_df and metadata.
     """
     try:
         xls = pd.ExcelFile(raw_url)
@@ -334,10 +335,14 @@ def compute_mtbf_mttr_from_url(raw_url):
     except Exception as e:
         return {"error": f"Could not read sheet '{sheet_name}': {e}"}
 
-    # attempt to detect OPERATIONAL HOURS and MAINTENANCE DELAY columns (case-insensitive)
+    # detect columns
     op_col = None
     maint_col = None
     date_col = None
+    week_col = None
+    year_col = None
+    month_col = None
+
     for c in df_op.columns:
         lc = str(c).lower()
         if ("operat" in lc and "hour" in lc) or ("operational" in lc and "hour" in lc):
@@ -345,8 +350,7 @@ def compute_mtbf_mttr_from_url(raw_url):
             break
     if op_col is None:
         for c in df_op.columns:
-            lc = str(c).lower()
-            if "operat" in lc:
+            if "operat" in str(c).lower():
                 op_col = c
                 break
 
@@ -362,26 +366,33 @@ def compute_mtbf_mttr_from_url(raw_url):
                 maint_col = c
                 break
 
-    # detect date column (we need to group by week/year)
+    # date-like
     for c in df_op.columns:
         lc = str(c).lower()
-        if lc in ("date", "dates"):
+        if lc in ("date", "tanggal", "tgl"):
             date_col = c
             break
     if date_col is None:
-        # try common patterns
         for c in df_op.columns:
-            lc = str(c).lower()
-            if "date" in lc:
+            if "date" in str(c).lower() or "tgl" in str(c).lower():
                 date_col = c
                 break
 
-    # parsing function for operational hours -> decimal hours
+    # week/year/month fields present?
+    for c in df_op.columns:
+        lc = str(c).lower()
+        if lc in ("week","week_no","week number","wk"):
+            week_col = c
+        if lc in ("year","tahun","yr"):
+            year_col = c
+        if lc in ("month","bulan","mon"):
+            month_col = c
+
+    # parse functions
     def _parse_operational_hours(val):
         try:
             if pd.isna(val) or (isinstance(val, str) and str(val).strip() == ""):
                 return float("nan")
-            # numeric values (including Excel time fraction)
             if isinstance(val, (int, float)) and not isinstance(val, bool):
                 v = float(val)
                 # Excel time fraction
@@ -389,14 +400,12 @@ def compute_mtbf_mttr_from_url(raw_url):
                     return v * 24.0
                 return v
             s = str(val).strip()
-            # time-like string e.g. "08:30" or "8:30:00"
             if ":" in s:
                 try:
                     td = pd.to_timedelta(s)
                     return td.total_seconds() / 3600.0
                 except Exception:
                     pass
-            # numeric string
             try:
                 return float(s)
             except Exception:
@@ -404,6 +413,7 @@ def compute_mtbf_mttr_from_url(raw_url):
         except Exception:
             return float("nan")
 
+    # apply parsing
     if op_col is not None:
         df_op["_op_hours_dec"] = df_op[op_col].apply(_parse_operational_hours)
     else:
@@ -414,119 +424,115 @@ def compute_mtbf_mttr_from_url(raw_url):
     else:
         df_op["_maint_delay_num"] = pd.Series([float("nan")] * len(df_op))
 
-    # parse date into datetime (fixing the quote typo you reported earlier)
+    # parse dates
     if date_col is not None:
         df_op["_date_parsed"] = pd.to_datetime(df_op[date_col], errors="coerce")
     else:
+        # try to build date from YEAR/WEEK if present
         df_op["_date_parsed"] = pd.NaT
+        if year_col in df_op.columns and week_col in df_op.columns:
+            def _from_yw(r):
+                try:
+                    y = int(r[year_col])
+                    w = int(r[week_col])
+                    return datetime.date.fromisocalendar(y, w, 1)
+                except Exception:
+                    return pd.NaT
+            df_op["_date_parsed"] = df_op.apply(_from_yw, axis=1)
 
-    # Compute YEAR and WEEK (ISO) - ensure numeric
-    try:
-        df_op["_date_parsed"] = pd.to_datetime(df_op["_date_parsed"], errors="coerce")
-        # use isocalendar for consistent ISO week/year
-        iso_vals = df_op["_date_parsed"].dt.isocalendar()
-        if not iso_vals.empty:
-            df_op["YEAR"] = iso_vals["year"].astype("Int64")
-            df_op["WEEK"] = iso_vals["week"].astype("Int64")
-        else:
-            df_op["YEAR"] = pd.Series([pd.NA] * len(df_op), dtype="Int64")
-            df_op["WEEK"] = pd.Series([pd.NA] * len(df_op), dtype="Int64")
-    except Exception:
-        df_op["YEAR"] = pd.Series([pd.NA] * len(df_op), dtype="Int64")
-        df_op["WEEK"] = pd.Series([pd.NA] * len(df_op), dtype="Int64")
+    # compute derived YEAR, WEEK, PERIOD_MONTH consistently
+    df_op_proc = df_op.copy()
+    df_op_proc["_date_parsed"] = pd.to_datetime(df_op_proc["_date_parsed"], errors="coerce")
 
-    total_rows_op_sheet = len(df_op)
-    total_operational_hours_op_sheet = float(df_op["_op_hours_dec"].sum(skipna=True))
-    total_maintenance_delay_op_sheet = float(df_op["_maint_delay_num"].sum(skipna=True))
-
-    if total_rows_op_sheet > 0:
-        mtbf_hours = total_operational_hours_op_sheet / total_rows_op_sheet
-        mttr_hours = total_maintenance_delay_op_sheet / total_rows_op_sheet
+    # YEAR/WEEK if not present
+    if (year_col not in df_op_proc.columns) or df_op_proc[year_col].isnull().all():
+        df_op_proc["YEAR"] = df_op_proc["_date_parsed"].dt.year
     else:
-        mtbf_hours = None
-        mttr_hours = None
+        df_op_proc["YEAR"] = pd.to_numeric(df_op_proc[year_col], errors="coerce")
 
-    # Also prepare weekly & monthly aggregations for charting (safe conversions included)
-    try:
-        df_op_proc = df_op.copy()
-        # ensure YEAR and WEEK exist and are numeric
-        df_op_proc["YEAR"] = pd.to_numeric(df_op_proc.get("YEAR"), errors="coerce").astype("Int64")
-        df_op_proc["WEEK"] = pd.to_numeric(df_op_proc.get("WEEK"), errors="coerce").astype("Int64")
-        # create PERIOD_MONTH for monthly grouping from parsed date if possible
-        df_op_proc["PERIOD_MONTH"] = df_op_proc["_date_parsed"].dt.strftime("%b %Y").fillna("")
-    except Exception:
-        df_op_proc = df_op.copy()
+    if (week_col not in df_op_proc.columns) or df_op_proc[week_col].isnull().all():
+        iso = df_op_proc["_date_parsed"].dt.isocalendar()
+        if not iso.empty:
+            df_op_proc["WEEK"] = iso.week
+        else:
+            df_op_proc["WEEK"] = pd.NA
+    else:
+        df_op_proc["WEEK"] = pd.to_numeric(df_op_proc[week_col], errors="coerce")
 
-    # Weekly aggregation (MTBF = sum(op hours) / count(rows); MTTR = sum(maint delay) / count(rows))
+    # PERIOD_MONTH computed by end-of-week month if date present else by MONTH column if exist
+    if "_date_parsed" in df_op_proc.columns and df_op_proc["_date_parsed"].notna().any():
+        week_start = df_op_proc["_date_parsed"].dt.to_period("W").apply(lambda r: r.start_time)
+        week_end = week_start + pd.Timedelta(days=6)
+        df_op_proc["PERIOD_MONTH"] = week_end.dt.strftime("%b %Y")
+    elif month_col in df_op_proc.columns and df_op_proc[month_col].notna().any():
+        df_op_proc["PERIOD_MONTH"] = df_op_proc[month_col].astype(str) + " " + df_op_proc["YEAR"].astype(pd.Int64Dtype()).astype(str)
+    else:
+        df_op_proc["PERIOD_MONTH"] = df_op_proc["YEAR"].astype(pd.Int64Dtype()).astype(str)
+
+    # Now group weekly and monthly
+    # For weekly: group by YEAR & WEEK — compute sums and count rows
     try:
         weekly_group = df_op_proc.groupby(["YEAR", "WEEK"], dropna=False).agg(
-            MTBF_hours_sum=(" _op_hours_dec", "sum") if False else ("_op_hours_dec", "sum"),
-            MTTR_hours_sum=("_maint_delay_num", "sum"),
-            maintenance_count=("_maint_delay_num", "count"),
-            op_count=("_op_hours_dec", "count"),
+            sum_op_hours=("_op_hours_dec", "sum"),
+            sum_maint_delay=("_maint_delay_num", "sum"),
+            count_rows=("_op_hours_dec", "count")
         ).reset_index()
-        # period label and week start
-        weekly_group["period_label"] = weekly_group["YEAR"].astype(str) + " W" + weekly_group["WEEK"].astype("Int64").astype(str)
-        # compute week_start reliably
-        def _week_start_from_row(r):
+    except Exception:
+        # safety: if grouping fails, return empty frames
+        weekly_group = pd.DataFrame(columns=["YEAR", "WEEK", "sum_op_hours", "sum_maint_delay", "count_rows"])
+
+    # compute mtbf / mttr for weekly
+    if not weekly_group.empty:
+        weekly_group["MTBF_hours"] = weekly_group.apply(lambda r: (r["sum_op_hours"] / r["count_rows"]) if r["count_rows"] and r["count_rows"] > 0 else float("nan"), axis=1)
+        weekly_group["MTTR_hours"] = weekly_group.apply(lambda r: (r["sum_maint_delay"] / r["count_rows"]) if r["count_rows"] and r["count_rows"] > 0 else float("nan"), axis=1)
+        # prepare period_label
+        weekly_group["period_label"] = weekly_group["YEAR"].astype(pd.Int64Dtype()).astype(str) + " W" + weekly_group["WEEK"].astype(pd.Int64Dtype()).astype(str)
+        # compute week_start for sorting
+        def _wsafe(r):
             try:
                 return datetime.date.fromisocalendar(int(r["YEAR"]), int(r["WEEK"]), 1)
             except Exception:
                 return pd.NaT
-        weekly_group["week_start"] = weekly_group.apply(_week_start_from_row, axis=1)
-        # compute final MTBF and MTTR per group (use maintenance_count or op_count as denominator as you asked - we use count of rows)
-        weekly_group["MTBF_hours"] = weekly_group.apply(lambda r: (r["MTBF_hours_sum"] / r["op_count"]) if (pd.notna(r["op_count"]) and r["op_count"] > 0) else pd.NA, axis=1)
-        weekly_group["MTTR_hours"] = weekly_group.apply(lambda r: (r["MTTR_hours_sum"] / r["maintenance_count"]) if (pd.notna(r["maintenance_count"]) and r["maintenance_count"] > 0) else pd.NA, axis=1)
-        # ensure numeric
-        weekly_group["MTBF_hours"] = pd.to_numeric(weekly_group["MTBF_hours"], errors="coerce")
-        weekly_group["MTTR_hours"] = pd.to_numeric(weekly_group["MTTR_hours"], errors="coerce")
-        weekly_group = weekly_group.sort_values("week_start", ascending=False).reset_index(drop=True)
-    except Exception:
-        weekly_group = pd.DataFrame(columns=["YEAR", "WEEK", "period_label", "week_start", "MTBF_hours", "MTTR_hours"])
+        weekly_group["week_start"] = weekly_group.apply(_wsafe, axis=1)
+        weekly_group = weekly_group.sort_values(by=["week_start"], ascending=False).reset_index(drop=True)
+    else:
+        weekly_group = weekly_group
 
-    # Monthly aggregation
+    # Monthly grouping
     try:
-        monthly_group = df_op_proc.groupby("PERIOD_MONTH", dropna=False).agg(
-            MTBF_hours_sum=("_op_hours_dec", "sum"),
-            MTTR_hours_sum=("_maint_delay_num", "sum"),
-            op_count=("_op_hours_dec", "count"),
-            maintenance_count=("_maint_delay_num", "count"),
+        monthly_group = df_op_proc.groupby(["PERIOD_MONTH"], dropna=False).agg(
+            sum_op_hours=("_op_hours_dec", "sum"),
+            sum_maint_delay=("_maint_delay_num", "sum"),
+            count_rows=("_op_hours_dec", "count")
         ).reset_index()
-        monthly_group["period_dt"] = pd.to_datetime(monthly_group["PERIOD_MONTH"], format="%b %Y", errors="coerce")
-        monthly_group["MTBF_hours"] = monthly_group.apply(lambda r: (r["MTBF_hours_sum"] / r["op_count"]) if (pd.notna(r["op_count"]) and r["op_count"] > 0) else pd.NA, axis=1)
-        monthly_group["MTTR_hours"] = monthly_group.apply(lambda r: (r["MTTR_hours_sum"] / r["maintenance_count"]) if (pd.notna(r["maintenance_count"]) and r["maintenance_count"] > 0) else pd.NA, axis=1)
-        monthly_group["MTBF_hours"] = pd.to_numeric(monthly_group["MTBF_hours"], errors="coerce")
-        monthly_group["MTTR_hours"] = pd.to_numeric(monthly_group["MTTR_hours"], errors="coerce")
-        monthly_group = monthly_group.sort_values("period_dt", ascending=False).reset_index(drop=True)
     except Exception:
-        monthly_group = pd.DataFrame(columns=["PERIOD_MONTH", "period_dt", "MTBF_hours", "MTTR_hours"])
+        monthly_group = pd.DataFrame(columns=["PERIOD_MONTH", "sum_op_hours", "sum_maint_delay", "count_rows"])
+
+    if not monthly_group.empty:
+        monthly_group["MTBF_hours"] = monthly_group.apply(lambda r: (r["sum_op_hours"] / r["count_rows"]) if r["count_rows"] and r["count_rows"] > 0 else float("nan"), axis=1)
+        monthly_group["MTTR_hours"] = monthly_group.apply(lambda r: (r["sum_maint_delay"] / r["count_rows"]) if r["count_rows"] and r["count_rows"] > 0 else float("nan"), axis=1)
+        # sort months chronologically if possible
+        monthly_group["period_dt"] = pd.to_datetime(monthly_group["PERIOD_MONTH"], format="%b %Y", errors="coerce")
+        monthly_group = monthly_group.sort_values(by=["period_dt", "PERIOD_MONTH"], ascending=False).reset_index(drop=True)
+    else:
+        monthly_group = monthly_group
 
     return {
         "sheet_name": sheet_name,
-        "operational_hours_column": op_col,
-        "maintenance_delay_column": maint_col,
-        "date_column": date_col,
-        "total_rows": total_rows_op_sheet,
-        "total_operational_hours": total_operational_hours_op_sheet,
-        "total_maintenance_delay": total_maintenance_delay_op_sheet,
-        "MTBF_hours": mtbf_hours,
-        "MTTR_hours": mttr_hours,
+        "op_col": op_col,
+        "maint_col": maint_col,
         "weekly_group": weekly_group,
         "monthly_group": monthly_group,
-        "df_op_proc_sample": df_op_proc.head(5).to_dict(orient="records"),
+        "total_rows": len(df_op_proc),
     }
 
-# call the MTBF/MTTR computation (safe, cached)
-_mtbf_mttr_res = compute_mtbf_mttr_from_url(RAW_URL)
+# compute mt trends (cached)
+_mt_trends_res = compute_mt_trends_from_workbook(RAW_URL)
 
-# Expose variables (global names that won't clash with existing variables)
-MTBF_GLOBAL_HOURS = _mtbf_mttr_res.get("MTBF_hours") if isinstance(_mtbf_mttr_res, dict) else None
-MTTR_GLOBAL_HOURS = _mtbf_mttr_res.get("MTTR_hours") if isinstance(_mtbf_mttr_res, dict) else None
-MTBF_GLOBAL_HOURS_ROUNDED = round(MTBF_GLOBAL_HOURS, 2) if (MTBF_GLOBAL_HOURS is not None) else None
-MTTR_GLOBAL_HOURS_ROUNDED = round(MTTR_GLOBAL_HOURS, 2) if (MTTR_GLOBAL_HOURS is not None) else None
-
-WEEKLY_MT_GROUP = _mtbf_mttr_res.get("weekly_group") if isinstance(_mtbf_mttr_res, dict) else pd.DataFrame()
-MONTHLY_MT_GROUP = _mtbf_mttr_res.get("monthly_group") if isinstance(_mtbf_mttr_res, dict) else pd.DataFrame()
+# extract safe handles (do not overwrite existing variables)
+MT_TR_RELIABILITY_SHEET = _mt_trends_res.get("sheet_name") if isinstance(_mt_trends_res, dict) else None
+MT_RELIABILITY_WEEKLY_DF = _mt_trends_res.get("weekly_group") if isinstance(_mt_trends_res, dict) else pd.DataFrame()
+MT_RELIABILITY_MONTHLY_DF = _mt_trends_res.get("monthly_group") if isinstance(_mt_trends_res, dict) else pd.DataFrame()
 
 # -------------------------
 # Sidebar Filters
@@ -534,16 +540,9 @@ MONTHLY_MT_GROUP = _mtbf_mttr_res.get("monthly_group") if isinstance(_mtbf_mttr_
 st.sidebar.header("Filters & Options")
 granularity = st.sidebar.selectbox("Time granularity", options=["WEEK", "PERIOD_MONTH"], index=1)
 
-# ---------- YEAR multi-select filter (global) ----------
-all_years = []
-if "YEAR" in df.columns:
-    years_unique = pd.Series(df["YEAR"].dropna().astype(int).unique()).sort_values(ascending=False)
-    all_years = years_unique.astype(int).tolist()
-
-# default all selected (if there are years)
-selected_years = st.sidebar.multiselect("Select Year(s)", options=all_years, default=all_years if all_years else [])
-
+# -------------------------
 # Build month list from PERIOD_MONTH (chronologically) — this fixes mismatch when weeks were reassigned to later month
+# -------------------------
 months_available = []
 if "PERIOD_MONTH" in df.columns:
     unique_pm = pd.Series(df["PERIOD_MONTH"].dropna().astype(str).str.strip().unique())
@@ -591,15 +590,25 @@ months = ["All"] + months_available
 selected_month = st.sidebar.selectbox("MONTH", months, index=0)
 
 # -------------------------
-# Apply global year filter to df
+# Year multiselect filter (new) — placed on sidebar (default: all years selected)
 # -------------------------
+# Build years list (descending)
+years_available = []
+if "YEAR" in df.columns:
+    years_available = sorted(pd.Series(df["YEAR"].dropna().astype(int).unique()).unique().tolist(), reverse=True)
+if not years_available:
+    years_available = []
+
+selected_years = st.sidebar.multiselect("Year (filter)", options=years_available, default=years_available)
+
 filtered = df.copy()
+# apply year filter globally if selection provided
 if selected_years:
-    # user selected some years -> filter
-    filtered = filtered[filtered["YEAR"].isin(selected_years)].copy()
-# apply month filter if chosen
+    filtered = filtered[filtered["YEAR"].isin(selected_years)]
+
+# apply month filter after year filter
 if selected_month != "All" and selected_month != "":
-    filtered = filtered[filtered["PERIOD_MONTH"] == selected_month].copy()
+    filtered = filtered[filtered["PERIOD_MONTH"] == selected_month]
 
 # -------------------------
 # KPI Calculations (compute BEFORE applying category drilldown)
@@ -671,164 +680,180 @@ except Exception:
     ytd_total_delay = None
 
 # -------------------------
-# Top Row: KPIs + Donuts
+# Build Tabs: Main Dashboard | Reliability
 # -------------------------
-kpi_col, donut1_col, donut2_col = st.columns([1,2,2])
-with kpi_col:
-    st.subheader("Key KPIs")
-    min_caption = None
-    max_caption = None
-    if "PERIOD_MONTH" in filtered.columns and not filtered["PERIOD_MONTH"].dropna().empty:
-        parsed = pd.to_datetime(filtered["PERIOD_MONTH"].dropna().unique(), format="%b %Y", errors="coerce")
-        if parsed.notna().any():
-            min_dt = parsed.min()
-            max_dt = parsed.max()
-            if pd.notna(min_dt) and pd.notna(max_dt):
-                min_caption = min_dt.strftime("%d/%m/%Y")
-                max_caption = (max_dt + pd.offsets.MonthEnd(0)).strftime("%d/%m/%Y")
-    if min_caption is None and "YEAR" in filtered.columns and filtered["YEAR"].notna().any():
-        min_y = int(filtered["YEAR"].min())
-        max_y = int(filtered["YEAR"].max())
-        min_caption = f"01/01/{min_y}"
-        max_caption = f"31/12/{max_y}"
+tabs = st.tabs(["Main Dashboard", "Reliability: MTBF & MTTR"])
+tab_main, tab_reliability = tabs[0], tabs[1]
 
-    st.caption(f"Data obtained from {min_caption} to {max_caption}" if min_caption and max_caption else "Data obtained from unknown date range")
+# -------------------------
+# MAIN DASHBOARD TAB
+# -------------------------
+with tab_main:
+    # -------------------------
+    # Top Row: KPIs + Donuts
+    # -------------------------
+    kpi_col, donut1_col, donut2_col = st.columns([1,2,2])
+    with kpi_col:
+        st.subheader("Key KPIs")
+        # small reliability switch button (does NOT auto-switch tabs — user will switch manually)
+        if "reliability_hint" not in st.session_state:
+            st.session_state["reliability_hint"] = False
+        if st.button("Reliability tab", key="reliability_button"):
+            st.session_state["reliability_hint"] = True
+            st.info("Tip: Please manually select the 'Reliability: MTBF & MTTR' tab above to view reliability charts.")
 
-    # Show monthly (current filter) KPIs - use 2 decimal percent formatting
-    st.metric("Physical Availability (PA)", f"{PA:.2%}" if PA is not None else "N/A", delta=f"Target {pa_target:.2%}")
-    st.metric("Mechanical Availability (MA)", f"{MA:.2%}" if MA is not None else "N/A", delta=f"Target {ma_target:.2%}")
-    st.metric("Total Delay Hours (selected)", f"{total_delay:.2f} hrs")
-    st.metric("Total Available Time (selected)", f"{available_time:.2f} hrs" if available_time else "N/A")
+        min_caption = None
+        max_caption = None
+        if "PERIOD_MONTH" in filtered.columns and not filtered["PERIOD_MONTH"].dropna().empty:
+            parsed = pd.to_datetime(filtered["PERIOD_MONTH"].dropna().unique(), format="%b %Y", errors="coerce")
+            if parsed.notna().any():
+                min_dt = parsed.min()
+                max_dt = parsed.max()
+                if pd.notna(min_dt) and pd.notna(max_dt):
+                    min_caption = min_dt.strftime("%d/%m/%Y")
+                    max_caption = (max_dt + pd.offsets.MonthEnd(0)).strftime("%d/%m/%Y")
+        if min_caption is None and "YEAR" in filtered.columns and filtered["YEAR"].notna().any():
+            min_y = int(filtered["YEAR"].min())
+            max_y = int(filtered["YEAR"].max())
+            min_caption = f"01/01/{min_y}"
+            max_caption = f"31/12/{max_y}"
 
-    # YTD row
-    if ytd_PA is not None:
-        st.write("")  # spacing
-        st.caption(f"YTD (up to selected): PA {ytd_PA:.2%} | MA {ytd_MA:.2%} | Delay {ytd_total_delay:.2f} hrs")
-    else:
-        st.write("")
+        st.caption(f"Data obtained from {min_caption} to {max_caption}" if min_caption and max_caption else "Data obtained from unknown date range")
 
-with donut1_col:
-    st.subheader("Delay by Category")
-    if "CATEGORY" in filtered.columns:
-        donut_data = filtered.groupby("CATEGORY", dropna=False)["DELAY"].sum().reset_index().sort_values("DELAY", ascending=False)
-        if not donut_data.empty:
-            # round values for display
-            donut_data["DELAY"] = donut_data["DELAY"].round(2)
-            donut_fig = go.Figure(data=[go.Pie(labels=donut_data["CATEGORY"], values=donut_data["DELAY"], hole=0.4, textinfo="label+percent", hovertemplate="%{label}: %{value:.2f} hrs<extra></extra>")])
-            donut_fig.update_layout(margin=dict(t=20,b=20,l=20,r=20))
-            st.plotly_chart(donut_fig, use_container_width=True)
+        # Show monthly (current filter) KPIs
+        st.metric("Physical Availability (PA)", f"{PA:.2%}" if PA is not None else "N/A", delta=f"Target {pa_target:.2%}")
+        st.metric("Mechanical Availability (MA)", f"{MA:.2%}" if MA is not None else "N/A", delta=f"Target {ma_target:.2%}")
+        st.metric("Total Delay Hours (selected)", f"{total_delay:.2f} hrs")
+        st.metric("Total Available Time (selected)", f"{available_time:.2f} hrs" if available_time else "N/A")
+
+        # YTD row
+        if ytd_PA is not None:
+            st.write("")  # spacing
+            st.caption(f"YTD (up to selected): PA {ytd_PA:.2%} | MA {ytd_MA:.2%} | Delay {ytd_total_delay:.2f} hrs")
         else:
-            st.info("No delay data available.")
-    else:
-        st.info("No category data available.")
+            st.write("")
 
-with donut2_col:
-    st.subheader("Scheduled vs Unscheduled (Maintenance only)")
-    if "MTN_DELAY_TYPE" in filtered.columns:
-        maint_df = filtered[filtered["CATEGORY"] == "Maintenance"].copy()
-        if not maint_df.empty:
-            sched_donut = maint_df.groupby("SUB_CATEGORY")["DELAY"].sum().reset_index().sort_values("DELAY", ascending=False)
-            if not sched_donut.empty:
+    with donut1_col:
+        st.subheader("Delay by Category")
+        if "CATEGORY" in filtered.columns:
+            donut_data = filtered.groupby("CATEGORY", dropna=False)["DELAY"].sum().reset_index().sort_values("DELAY", ascending=False)
+            if not donut_data.empty:
                 # round values for display
-                sched_donut["DELAY"] = sched_donut["DELAY"].round(2)
-                donut_fig2 = go.Figure(data=[go.Pie(labels=sched_donut["SUB_CATEGORY"], values=sched_donut["DELAY"], hole=0.4, textinfo="label+percent", hovertemplate="%{label}: %{value:.2f} hrs<extra></extra>")])
-                donut_fig2.update_layout(margin=dict(t=20,b=20,l=20,r=20))
-                st.plotly_chart(donut_fig2, use_container_width=True)
+                donut_data["DELAY"] = donut_data["DELAY"].round(2)
+                donut_fig = go.Figure(data=[go.Pie(labels=donut_data["CATEGORY"], values=donut_data["DELAY"], hole=0.4, textinfo="label+percent", hovertemplate="%{label}: %{value:.2f} hrs<extra></extra>")])
+                donut_fig.update_layout(margin=dict(t=20,b=20,l=20,r=20))
+                st.plotly_chart(donut_fig, use_container_width=True)
             else:
-                st.info("No maintenance breakdown available.")
+                st.info("No delay data available.")
         else:
-            st.info("No maintenance data found in selection.")
-    else:
-        st.info("No MTN_DELAY_TYPE column available.")
+            st.info("No category data available.")
 
-st.markdown("---")
+    with donut2_col:
+        st.subheader("Scheduled vs Unscheduled (Maintenance only)")
+        if "MTN_DELAY_TYPE" in filtered.columns:
+            maint_df = filtered[filtered["CATEGORY"] == "Maintenance"].copy()
+            if not maint_df.empty:
+                sched_donut = maint_df.groupby("SUB_CATEGORY")["DELAY"].sum().reset_index().sort_values("DELAY", ascending=False)
+                if not sched_donut.empty:
+                    # round values for display
+                    sched_donut["DELAY"] = sched_donut["DELAY"].round(2)
+                    donut_fig2 = go.Figure(data=[go.Pie(labels=sched_donut["SUB_CATEGORY"], values=sched_donut["DELAY"], hole=0.4, textinfo="label+percent", hovertemplate="%{label}: %{value:.2f} hrs<extra></extra>")])
+                    donut_fig2.update_layout(margin=dict(t=20,b=20,l=20,r=20))
+                    st.plotly_chart(donut_fig2, use_container_width=True)
+                else:
+                    st.info("No maintenance breakdown available.")
+            else:
+                st.info("No maintenance data found in selection.")
+        else:
+            st.info("No MTN_DELAY_TYPE column available.")
 
-# -------------------------
-# Trend Analysis
-# -------------------------
-st.subheader("Trend: Total Delay Hours vs PA%")
-group_field = granularity
+    st.markdown("---")
 
-# ---------- (UPDATED) Use GLOBAL latest week for 52-week cutoff ----------
-if group_field == "WEEK":
-    latest_week_start_global = df["WEEK_START"].dropna().max() if "WEEK_START" in df.columns else pd.NaT
-    if pd.isna(latest_week_start_global):
-        latest_week_start = filtered["WEEK_START"].dropna().max() if "WEEK_START" in filtered.columns else pd.NaT
-    else:
-        latest_week_start = latest_week_start_global
+    # -------------------------
+    # Trend Analysis
+    # -------------------------
+    st.subheader("Trend: Total Delay Hours vs PA%")
+    group_field = granularity
 
-    if pd.isna(latest_week_start):
-        filtered_for_trend = filtered.copy()
-    else:
-        cutoff_date = latest_week_start - datetime.timedelta(weeks=51)
-        filtered_for_trend = filtered[filtered["WEEK_START"].notna() & (pd.to_datetime(filtered["WEEK_START"]) >= pd.to_datetime(cutoff_date))].copy()
-        if filtered_for_trend.empty:
+    # ---------- (UPDATED) Use GLOBAL latest week for 52-week cutoff ----------
+    if group_field == "WEEK":
+        latest_week_start_global = df["WEEK_START"].dropna().max() if "WEEK_START" in df.columns else pd.NaT
+        if pd.isna(latest_week_start_global):
+            latest_week_start = filtered["WEEK_START"].dropna().max() if "WEEK_START" in filtered.columns else pd.NaT
+        else:
+            latest_week_start = latest_week_start_global
+
+        if pd.isna(latest_week_start):
             filtered_for_trend = filtered.copy()
-else:
-    filtered_for_trend = filtered.copy()
-
-if group_field == "WEEK":
-    trend = filtered_for_trend.groupby(["YEAR","WEEK"], dropna=False).agg(
-        total_delay_hours=("DELAY","sum"),
-        available_time_month=("AVAILABLE_TIME_MONTH","max"),
-        available_hours=("AVAILABLE_HOURS","max")
-    ).reset_index()
-    trend["period_label"] = trend["YEAR"].astype(str) + " W" + trend["WEEK"].astype("Int64").astype(str)
-    def _week_start_from_row(r):
-        try:
-            return datetime.date.fromisocalendar(int(r["YEAR"]), int(r["WEEK"]), 1)
-        except Exception:
-            return pd.NaT
-    trend["week_start"] = trend.apply(_week_start_from_row, axis=1)
-    trend = trend.sort_values(by=["week_start"], ascending=True)
-    x_field = "period_label"
-
-elif group_field == "PERIOD_MONTH":
-    trend = filtered.groupby("PERIOD_MONTH", dropna=False).agg(
-        total_delay_hours=("DELAY","sum"),
-        available_time_month=("AVAILABLE_TIME_MONTH","max"),
-        available_hours=("AVAILABLE_HOURS","max")
-    ).reset_index()
-    trend["period_dt"] = pd.to_datetime(trend["PERIOD_MONTH"], format="%b %Y", errors="coerce")
-    trend = trend.sort_values(by=["period_dt", "PERIOD_MONTH"], ascending=True)
-    x_field = "PERIOD_MONTH"
-else:
-    trend = filtered.groupby(group_field).agg(total_delay_hours=("DELAY","sum"), available_time_month=("AVAILABLE_TIME_MONTH","max"), available_hours=("AVAILABLE_HOURS","max")).reset_index()
-    x_field = group_field
-
-trend["PA_pct"] = None
-trend["available_for_pa"] = None
-for idx, row in trend.iterrows():
-    avail_month = row.get("available_time_month", None)
-    avail_hours = row.get("available_hours", None)
-    if pd.notna(avail_month) and avail_month > 0:
-        avail = avail_month
-    elif pd.notna(avail_hours) and avail_hours > 0:
-        avail = avail_hours
+        else:
+            cutoff_date = latest_week_start - datetime.timedelta(weeks=51)
+            filtered_for_trend = filtered[filtered["WEEK_START"].notna() & (pd.to_datetime(filtered["WEEK_START"]) >= pd.to_datetime(cutoff_date))].copy()
+            if filtered_for_trend.empty:
+                filtered_for_trend = filtered.copy()
     else:
-        avail = None
-    trend.at[idx,"available_for_pa"] = avail
-    if avail and avail > 0:
-        trend.at[idx,"PA_pct"] = max(0, 1 - row["total_delay_hours"] / avail)
+        filtered_for_trend = filtered.copy()
 
-# ---------- swap visuals & coloring (PA bars, Delay line) ----------
-trend["PA_pct"] = pd.to_numeric(trend["PA_pct"], errors="coerce")
-trend["PA_pct_rounded"] = trend["PA_pct"].round(4)  # keep fractional representation for precision, we'll format when showing
-trend["total_delay_hours"] = pd.to_numeric(trend["total_delay_hours"], errors="coerce")
-trend["total_delay_hours_rounded"] = trend["total_delay_hours"].round(2)
+    if group_field == "WEEK":
+        trend = filtered_for_trend.groupby(["YEAR","WEEK"], dropna=False).agg(
+            total_delay_hours=("DELAY","sum"),
+            available_time_month=("AVAILABLE_TIME_MONTH","max"),
+            available_hours=("AVAILABLE_HOURS","max")
+        ).reset_index()
+        trend["period_label"] = trend["YEAR"].astype(str) + " W" + trend["WEEK"].astype("Int64").astype(str)
+        def _week_start_from_row(r):
+            try:
+                return datetime.date.fromisocalendar(int(r["YEAR"]), int(r["WEEK"]), 1)
+            except Exception:
+                return pd.NaT
+        trend["week_start"] = trend.apply(_week_start_from_row, axis=1)
+        trend = trend.sort_values(by=["week_start"])
+        x_field = "period_label"
 
-pa_threshold = pa_target if (pa_target is not None) else 0.9
-colors = []
-for v in trend["PA_pct_rounded"]:
-    if pd.isna(v):
-        colors.append("lightgrey")
-    elif v < pa_threshold:
-        colors.append("red")
+    elif group_field == "PERIOD_MONTH":
+        trend = filtered.groupby("PERIOD_MONTH", dropna=False).agg(
+            total_delay_hours=("DELAY","sum"),
+            available_time_month=("AVAILABLE_TIME_MONTH","max"),
+            available_hours=("AVAILABLE_HOURS","max")
+        ).reset_index()
+        trend["period_dt"] = pd.to_datetime(trend["PERIOD_MONTH"], format="%b %Y", errors="coerce")
+        trend = trend.sort_values(by=["period_dt", "PERIOD_MONTH"])
+        x_field = "PERIOD_MONTH"
     else:
-        colors.append("green")
+        trend = filtered.groupby(group_field).agg(total_delay_hours=("DELAY","sum"), available_time_month=("AVAILABLE_TIME_MONTH","max"), available_hours=("AVAILABLE_HOURS","max")).reset_index()
+        x_field = group_field
 
-fig_trend = go.Figure()
-if not trend.empty:
+    trend["PA_pct"] = None
+    trend["available_for_pa"] = None
+    for idx, row in trend.iterrows():
+        avail_month = row.get("available_time_month", None)
+        avail_hours = row.get("available_hours", None)
+        if pd.notna(avail_month) and avail_month > 0:
+            avail = avail_month
+        elif pd.notna(avail_hours) and avail_hours > 0:
+            avail = avail_hours
+        else:
+            avail = None
+        trend.at[idx,"available_for_pa"] = avail
+        if avail and avail > 0:
+            trend.at[idx,"PA_pct"] = max(0, 1 - row["total_delay_hours"] / avail)
+
+    # ---------- swap visuals & coloring (PA bars, Delay line) ----------
+    trend["PA_pct"] = pd.to_numeric(trend["PA_pct"], errors="coerce")
+    trend["PA_pct_rounded"] = trend["PA_pct"].round(4)
+    trend["total_delay_hours"] = pd.to_numeric(trend["total_delay_hours"], errors="coerce")
+    trend["total_delay_hours_rounded"] = trend["total_delay_hours"].round(2)
+
+    pa_threshold = pa_target if (pa_target is not None) else 0.9
+    colors = []
+    for v in trend["PA_pct_rounded"]:
+        if pd.isna(v):
+            colors.append("lightgrey")
+        elif v < pa_threshold:
+            colors.append("red")
+        else:
+            colors.append("green")
+
+    fig_trend = go.Figure()
     fig_trend.add_trace(
         go.Bar(
             x=trend[x_field],
@@ -856,48 +881,43 @@ if not trend.empty:
         xaxis_title="Period",
         yaxis=dict(title="PA%", overlaying=None, side="left", tickformat=".2%", range=[0,1]),
         yaxis2=dict(title="Delay Hours", overlaying="y", side="right"),
-        legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.15, yanchor="top"),
+        legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02, yanchor="bottom"),
         margin=dict(t=70)
     )
     st.plotly_chart(fig_trend, use_container_width=True)
-else:
-    st.info("No trend data available for the selected filters.")
 
-st.markdown("---")
+    st.markdown("---")
 
-# -------------------------
-# Pareto by Equipment
-# -------------------------
-st.subheader("Top Delay by Equipment (Pareto)")
+    # -------------------------
+    # Pareto by Equipment
+    # -------------------------
+    st.subheader("Top Delay by Equipment (Pareto)")
 
-if "EQUIPMENT_DESC" in filtered.columns and filtered["EQUIPMENT_DESC"].notna().any():
-    equipment_key = "EQUIPMENT_DESC"
-    equipment_series = filtered["EQUIPMENT_DESC"].replace("", "(Unknown)")
-else:
-    equipment_key = "CAUSE"
-    equipment_series = filtered["CAUSE"].replace("", "(Unknown)")
+    if "EQUIPMENT_DESC" in filtered.columns and filtered["EQUIPMENT_DESC"].notna().any():
+        equipment_key = "EQUIPMENT_DESC"
+        equipment_series = filtered["EQUIPMENT_DESC"].replace("", "(Unknown)")
+    else:
+        equipment_key = "CAUSE"
+        equipment_series = filtered["CAUSE"].replace("", "(Unknown)")
 
-equipment_agg = (
-    filtered.assign(_equip=equipment_series)
-    .groupby("_equip", dropna=False)
-    .agg(hours=("DELAY", "sum"))
-    .reset_index()
-    .rename(columns={"_equip": equipment_key})
-    .sort_values("hours", ascending=False)
-)
-equipment_agg[equipment_key] = equipment_agg[equipment_key].fillna("(Unknown)").astype(str)
-equipment_agg["cum_hours"] = equipment_agg["hours"].cumsum()
-total_hours_sum = equipment_agg["hours"].sum()
-equipment_agg["cum_pct"] = equipment_agg["cum_hours"] / total_hours_sum if total_hours_sum > 0 else 0
+    equipment_agg = (
+        filtered.assign(_equip=equipment_series)
+        .groupby("_equip", dropna=False)
+        .agg(hours=("DELAY", "sum"))
+        .reset_index()
+        .rename(columns={"_equip": equipment_key})
+        .sort_values("hours", ascending=False)
+    )
+    equipment_agg[equipment_key] = equipment_agg[equipment_key].fillna("(Unknown)").astype(str)
+    equipment_agg["cum_hours"] = equipment_agg["hours"].cumsum()
+    total_hours_sum = equipment_agg["hours"].sum()
+    equipment_agg["cum_pct"] = equipment_agg["cum_hours"] / total_hours_sum if total_hours_sum > 0 else 0
 
-top_n = st.slider("Top N equipment to show", min_value=5, max_value=50, value=15)
-pareto_df = equipment_agg.head(top_n)
+    top_n = st.slider("Top N equipment to show", min_value=5, max_value=50, value=15)
+    pareto_df = equipment_agg.head(top_n)
 
-fig_pareto = make_subplots(specs=[[{"secondary_y": True}]])
-if not pareto_df.empty:
+    fig_pareto = make_subplots(specs=[[{"secondary_y": True}]])
     fig_pareto.add_trace(go.Bar(x=pareto_df[equipment_key], y=pareto_df["hours"].round(2), name="Hours"), secondary_y=False)
-    # ensure cum_pct numeric
-    pareto_df["cum_pct"] = pd.to_numeric(pareto_df["cum_pct"], errors="coerce")
     fig_pareto.add_trace(
         go.Scatter(
             x=pareto_df[equipment_key],
@@ -908,241 +928,242 @@ if not pareto_df.empty:
         ),
         secondary_y=True
     )
-
-    fig_pareto.update_layout(xaxis_tickangle=-45, yaxis_title="Hours",
-                             legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.2, yanchor="top"),
-                             margin=dict(t=110))
+    # move legend above chart so it doesn't overlap equipment names
+    fig_pareto.update_layout(xaxis_tickangle=-45, yaxis_title="Hours", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.15, yanchor="bottom"), margin=dict(t=110))
     fig_pareto.update_yaxes(title_text="Cumulative %", tickformat=".2%", range=[0, 1], secondary_y=True)
     fig_pareto.update_yaxes(title_text="Delay Hours", secondary_y=False)
+
     st.plotly_chart(fig_pareto, use_container_width=True)
-else:
-    st.info("No pareto data to show for the selected filters.")
 
-# -------------------------
-# CATEGORY FILTER (below Pareto) -> directly drives Drilldown
-# -------------------------
-st.subheader("Filter by Delay Category (affects drilldown table)")
+    # -------------------------
+    # CATEGORY FILTER (below Pareto) -> directly drives Drilldown
+    # -------------------------
+    st.subheader("Filter by Delay Category (affects drilldown table)")
 
-category_options = [
-    "MAINTENANCE (ALL)",
-    "MAINTENANCE - SCHEDULED",
-    "MAINTENANCE - UNSCHEDULED",
-    "MINING DELAY",
-    "WEATHER DELAY",
-    "OTHER DELAY",
-]
-selected_category = st.selectbox("Select delay category", category_options, index=0)
+    category_options = [
+        "MAINTENANCE (ALL)",
+        "MAINTENANCE - SCHEDULED",
+        "MAINTENANCE - UNSCHEDULED",
+        "MINING DELAY",
+        "WEATHER DELAY",
+        "OTHER DELAY",
+    ]
+    selected_category = st.selectbox("Select delay category", category_options, index=0)
 
-if selected_category == "MAINTENANCE (ALL)":
-    drill_df_base = filtered[filtered["CATEGORY"] == "Maintenance"].copy()
-elif selected_category == "MAINTENANCE - SCHEDULED":
-    drill_df_base = filtered[(filtered["CATEGORY"] == "Maintenance") & (filtered["SUB_CATEGORY"] == "Scheduled")].copy()
-elif selected_category == "MAINTENANCE - UNSCHEDULED":
-    drill_df_base = filtered[(filtered["CATEGORY"] == "Maintenance") & (filtered["SUB_CATEGORY"] == "Unscheduled")].copy()
-elif selected_category == "MINING DELAY":
-    drill_df_base = filtered[filtered["CATEGORY"] == "Mining"].copy()
-elif selected_category == "WEATHER DELAY":
-    drill_df_base = filtered[filtered["CATEGORY"] == "Weather"].copy()
-elif selected_category == "OTHER DELAY":
-    drill_df_base = filtered[filtered["CATEGORY"] == "Other"].copy()
-else:
-    drill_df_base = filtered.copy()
+    if selected_category == "MAINTENANCE (ALL)":
+        drill_df_base = filtered[filtered["CATEGORY"] == "Maintenance"].copy()
+    elif selected_category == "MAINTENANCE - SCHEDULED":
+        drill_df_base = filtered[(filtered["CATEGORY"] == "Maintenance") & (filtered["SUB_CATEGORY"] == "Scheduled")].copy()
+    elif selected_category == "MAINTENANCE - UNSCHEDULED":
+        drill_df_base = filtered[(filtered["CATEGORY"] == "Maintenance") & (filtered["SUB_CATEGORY"] == "Unscheduled")].copy()
+    elif selected_category == "MINING DELAY":
+        drill_df_base = filtered[filtered["CATEGORY"] == "Mining"].copy()
+    elif selected_category == "WEATHER DELAY":
+        drill_df_base = filtered[filtered["CATEGORY"] == "Weather"].copy()
+    elif selected_category == "OTHER DELAY":
+        drill_df_base = filtered[filtered["CATEGORY"] == "Other"].copy()
+    else:
+        drill_df_base = filtered.copy()
 
-# -------------------------
-# Drill-down table (directly showing rows for the selected category)
-# -------------------------
-# Include selected_years info in the title
-years_caption = "All years" if (not selected_years or set(selected_years) == set(all_years)) else ", ".join(str(y) for y in sorted(selected_years, reverse=True))
-st.subheader(f"Drill-down data (filtered by selected category) — Years: {years_caption}")
+    # -------------------------
+    # Drill-down table (directly showing rows for the selected category)
+    # -------------------------
+    st.subheader("Drill-down data (filtered by selected category)")
 
-details_df = drill_df_base.copy()
+    details_df = drill_df_base.copy()
 
-# -------- (UPDATED) show assigned month in drilldown: use PERIOD_MONTH when available --------
-if "PERIOD_MONTH" in details_df.columns:
-    # overwrite MONTH for display so week -> latest month assignment is visible in the table
-    details_df["MONTH"] = details_df["PERIOD_MONTH"]
+    # -------- (UPDATED) show assigned month in drilldown: use PERIOD_MONTH when available --------
+    if "PERIOD_MONTH" in details_df.columns:
+        # overwrite MONTH for display so week -> latest month assignment is visible in the table
+        details_df["MONTH"] = details_df["PERIOD_MONTH"]
 
-# Ensure required columns exist
-required_cols = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "EQ_DESC", "DELAY", "NOTE", "SUB_CATEGORY", "YEAR"]
-for c in required_cols:
-    if c not in details_df.columns:
-        details_df[c] = ""
+    # Ensure required columns exist
+    required_cols = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "EQ_DESC", "DELAY", "NOTE", "SUB_CATEGORY", "YEAR"]
+    for c in required_cols:
+        if c not in details_df.columns:
+            details_df[c] = ""
 
-# Prepare output DataFrame
-details_out = details_df[["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "EQ_DESC", "DELAY", "NOTE", "SUB_CATEGORY", "YEAR"]].copy()
+    # Prepare output DataFrame
+    details_out = details_df[["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "EQ_DESC", "DELAY", "NOTE", "SUB_CATEGORY", "YEAR"]].copy()
 
-# Rename EQ_DESC -> Equipment Description for display
-details_out = details_out.rename(columns={"EQ_DESC": "Equipment Description"})
+    # Rename EQ_DESC -> Equipment Description for display
+    details_out = details_out.rename(columns={"EQ_DESC": "Equipment Description"})
 
-# Reorder columns depending on category selection
-if selected_category == "MAINTENANCE (ALL)":
-    ordered = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "SUB_CATEGORY", "Equipment Description", "DELAY", "NOTE"]
-else:
-    ordered = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "Equipment Description", "DELAY", "NOTE"]
+    # Reorder columns depending on category selection
+    if selected_category == "MAINTENANCE (ALL)":
+        ordered = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "SUB_CATEGORY", "Equipment Description", "DELAY", "NOTE"]
+    else:
+        ordered = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "Equipment Description", "DELAY", "NOTE"]
 
-# Some columns may not exist (safeguard)
-ordered = [c for c in ordered if c in details_out.columns]
+    # Some columns may not exist (safeguard)
+    ordered = [c for c in ordered if c in details_out.columns]
 
-# Convert WEEK to numeric for stable sorting
-details_out["WEEK"] = pd.to_numeric(details_out["WEEK"], errors="coerce")
+    # Convert WEEK to numeric for stable sorting
+    details_out["WEEK"] = pd.to_numeric(details_out["WEEK"], errors="coerce")
 
-# Sort by YEAR (descending as you prefer), WEEK (descending), START
-if "YEAR" in details_out.columns and details_out["YEAR"].notna().any():
-    details_out["YEAR"] = pd.to_numeric(details_out["YEAR"], errors="coerce")
-    details_out = details_out.sort_values(by=["YEAR", "WEEK", "START"], ascending=[False, False, True]).reset_index(drop=True)
-    details_out = details_out.drop(columns=["YEAR"], errors="ignore")
-else:
-    details_out = details_out.sort_values(by=["WEEK", "START"], ascending=[False, True]).reset_index(drop=True)
+    # Sort by YEAR, WEEK, START if YEAR exists, else by WEEK, START
+    if "YEAR" in details_out.columns and details_out["YEAR"].notna().any():
+        details_out["YEAR"] = pd.to_numeric(details_out["YEAR"], errors="coerce")
+        details_out = details_out.sort_values(by=["YEAR", "WEEK", "START"], ascending=[True, True, True]).reset_index(drop=True)
+        details_out = details_out.drop(columns=["YEAR"], errors="ignore")
+    else:
+        details_out = details_out.sort_values(by=["WEEK", "START"], ascending=[True, True]).reset_index(drop=True)
 
-# Only keep ordered columns for display
-details_out = details_out[ordered].reset_index(drop=True)
+    # Only keep ordered columns for display
+    details_out = details_out[ordered].reset_index(drop=True)
 
-# ---------- ROUND DELAY column to 2 decimals for display ----------
-def _round_maybe(x):
-    try:
-        if x is None or (isinstance(x, str) and str(x).strip() == ""):
+    # ---------- ROUND DELAY column to 2 decimals for display ----------
+    def _round_maybe(x):
+        try:
+            if x is None or (isinstance(x, str) and str(x).strip() == ""):
+                return x
+            xf = float(x)
+            return round(xf, 2)
+        except Exception:
             return x
-        xf = float(x)
-        return round(xf, 2)
-    except Exception:
-        return x
 
-if "DELAY" in details_out.columns:
-    details_out["DELAY"] = details_out["DELAY"].apply(_round_maybe)
+    if "DELAY" in details_out.columns:
+        details_out["DELAY"] = details_out["DELAY"].apply(_round_maybe)
 
-# Show using AgGrid (no pagination, scrollable)
-gob2 = GridOptionsBuilder.from_dataframe(details_out)
-gob2.configure_grid_options(pagination=False)
-gob2.configure_default_column(editable=False, sortable=True, filter=True, resizable=True, wrapText=True, autoHeight=True)
-grid_options2 = gob2.build()
+    # Show using AgGrid (no pagination, scrollable)
+    gob2 = GridOptionsBuilder.from_dataframe(details_out)
+    gob2.configure_grid_options(pagination=False)
+    gob2.configure_default_column(editable=False, sortable=True, filter=True, resizable=True, wrapText=True, autoHeight=True)
+    grid_options2 = gob2.build()
 
-AgGrid(
-    details_out,
-    gridOptions=grid_options2,
-    update_mode=GridUpdateMode.NO_UPDATE,
-    allow_unsafe_jscode=False,
-    height=600,
-    fit_columns_on_grid_load=True,
-    theme="balham"
-)
-
-st.markdown("---")
+    AgGrid(
+        details_out,
+        gridOptions=grid_options2,
+        update_mode=GridUpdateMode.NO_UPDATE,
+        allow_unsafe_jscode=False,
+        height=600,
+        fit_columns_on_grid_load=True,
+        theme="balham"
+    )
 
 # -------------------------
-# MTBF / MTTR Tabbed View
+# RELIABILITY TAB
 # -------------------------
-st.subheader("Reliability: MTBF & MTTR")
-tabs = st.tabs(["Main Dashboard", "MTTR & MTBF Trends"])
-# note: first tab will re-show a summary of the main dashboard; second contains the four charts
-with tabs[0]:
-    st.write("Main Dashboard (same content above). Use the main page for interactive filters and drilldowns.")
+with tab_reliability:
+    st.subheader("Reliability: MTBF & MTTR")
+    st.caption("MTBF = (operational hours) / (count rows) per period. MTTR = (maintenance delay) / (count rows) per period. Source sheet: " + (MT_TR_RELIABILITY_SHEET or "Not found"))
 
-with tabs[1]:
-    st.write("MTTR & MTBF: weekly and monthly trendlines. Year filter and time granularity are controlled from the sidebar.")
-    # use the same selected_years and selected_month filters
-    # Prepare weekly and monthly groups from computed data
-    wg = WEEKLY_MT_GROUP.copy()
-    mg = MONTHLY_MT_GROUP.copy()
+    # We will use the cached computed dataframes
+    weekly_df = MT_RELIABILITY_WEEKLY_DF.copy() if isinstance(MT_RELIABILITY_WEEKLY_DF, pd.DataFrame) else pd.DataFrame()
+    monthly_df = MT_RELIABILITY_MONTHLY_DF.copy() if isinstance(MT_RELIABILITY_MONTHLY_DF, pd.DataFrame) else pd.DataFrame()
 
-    # apply the global year filter to weekly group
-    if not wg.empty:
-        if selected_years:
-            wg = wg[wg["YEAR"].isin(selected_years)].copy()
-        # Ensure numeric
-        wg["MTTR_hours"] = pd.to_numeric(wg["MTTR_hours"], errors="coerce")
-        wg["MTBF_hours"] = pd.to_numeric(wg["MTBF_hours"], errors="coerce")
-        wg = wg.sort_values("week_start", ascending=True).reset_index(drop=True)
+    # Apply year filter to reliability dataframes as well (global)
+    if not weekly_df.empty and selected_years:
+        # weekly_df has YEAR column
+        if "YEAR" in weekly_df.columns:
+            weekly_df = weekly_df[weekly_df["YEAR"].isin(selected_years)]
 
-    if not mg.empty:
-        # monthly period filter
-        if selected_month != "All" and selected_month != "":
-            mg = mg[mg["PERIOD_MONTH"] == selected_month].copy()
-        # no year selection on monthly_group directly, since PERIOD_MONTH may include year; we can filter by the year(s)
-        if selected_years:
-            # parse year from PERIOD_MONTH
-            mg["year_parsed"] = pd.to_datetime(mg["PERIOD_MONTH"], format="%b %Y", errors="coerce").dt.year
-            mg = mg[mg["year_parsed"].isin(selected_years)].copy()
-        mg["MTTR_hours"] = pd.to_numeric(mg["MTTR_hours"], errors="coerce")
-        mg["MTBF_hours"] = pd.to_numeric(mg["MTBF_hours"], errors="coerce")
-        mg = mg.sort_values("period_dt", ascending=True).reset_index(drop=True)
-
-    # Chart layout: four plots (two rows x two columns)
-    col1, col2 = st.columns(2)
-
-    # Weekly MTTR
-    with col1:
-        st.subheader("MTTR - Weekly")
-        if wg.empty:
-            st.info("No weekly MTTR data available for the selected filters.")
+    if not monthly_df.empty and selected_years:
+        # monthly_df has period_dt if parsed, else fallback: try to extract year from PERIOD_MONTH
+        if "period_dt" in monthly_df.columns and monthly_df["period_dt"].notna().any():
+            monthly_df = monthly_df[monthly_df["period_dt"].dt.year.isin(selected_years)]
         else:
-            # Limit to latest 52 weeks if many exist
-            if len(wg) > 52:
-                wg_plot = wg.tail(52).copy()
+            # try to parse year from PERIOD_MONTH string
+            def _pm_year(s):
+                try:
+                    return int(str(s).split()[-1])
+                except Exception:
+                    return None
+            monthly_df["_yr"] = monthly_df["PERIOD_MONTH"].apply(_pm_year)
+            monthly_df = monthly_df[monthly_df["_yr"].isin(selected_years)]
+            monthly_df = monthly_df.drop(columns=["_yr"], errors="ignore")
+
+    # Provide two sets of charts: MTTR weekly+monthly and MTBF weekly+monthly (4 charts)
+    st.markdown("### MTTR (Mean Time To Repair)")
+    cols_mttr = st.columns(2)
+    # Weekly MTTR
+    with cols_mttr[0]:
+        st.markdown("**MTTR — Weekly**")
+        if weekly_df.empty:
+            st.info("No weekly reliability data available.")
+        else:
+            # limit to latest 52 weeks (global latest week)
+            try:
+                if "week_start" in weekly_df.columns and weekly_df["week_start"].notna().any():
+                    latest_ws = weekly_df["week_start"].dropna().max()
+                    cutoff = latest_ws - pd.Timedelta(weeks=51)
+                    weekly_df_limited = weekly_df[pd.to_datetime(weekly_df["week_start"]) >= pd.to_datetime(cutoff)].copy()
+                else:
+                    weekly_df_limited = weekly_df.copy()
+            except Exception:
+                weekly_df_limited = weekly_df.copy()
+            if weekly_df_limited.empty:
+                st.info("No weekly reliability data in selected years / range.")
             else:
-                wg_plot = wg.copy()
-            fig_mttr_w = go.Figure()
-            fig_mttr_w.add_trace(go.Bar(x=wg_plot["period_label"], y=wg_plot["MTTR_hours"].round(2), name="MTTR (hrs)"))
-            fig_mttr_w.update_layout(
-                xaxis_title="Week",
-                yaxis_title="MTTR (hrs)",
-                legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.2),
-                margin=dict(t=40)
-            )
-            st.plotly_chart(fig_mttr_w, use_container_width=True)
+                fig_mttr_w = go.Figure()
+                fig_mttr_w.add_trace(go.Bar(x=weekly_df_limited["period_label"], y=weekly_df_limited["MTTR_hours"].round(2), name="MTTR (hrs)"))
+                fig_mttr_w.add_trace(go.Scatter(x=weekly_df_limited["period_label"], y=weekly_df_limited["MTTR_hours"].round(2), name="MTTR (line)", mode="lines+markers"))
+                fig_mttr_w.update_layout(xaxis_title="Week", yaxis_title="MTTR (hours)", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02), margin=dict(t=60))
+                st.plotly_chart(fig_mttr_w, use_container_width=True)
 
     # Monthly MTTR
-    with col2:
-        st.subheader("MTTR - Monthly")
-        if mg.empty:
-            st.info("No monthly MTTR data available for the selected filters.")
+    with cols_mttr[1]:
+        st.markdown("**MTTR — Monthly**")
+        if monthly_df.empty:
+            st.info("No monthly reliability data available.")
         else:
-            mg_plot = mg.copy()
-            fig_mttr_m = go.Figure()
-            fig_mttr_m.add_trace(go.Bar(x=mg_plot["PERIOD_MONTH"], y=mg_plot["MTTR_hours"].round(2), name="MTTR (hrs) - Monthly"))
-            fig_mttr_m.update_layout(
-                xaxis_title="Period (Month)",
-                yaxis_title="MTTR (hrs)",
-                legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.2),
-                margin=dict(t=40)
-            )
-            st.plotly_chart(fig_mttr_m, use_container_width=True)
-
-    # Next row: MTBF weekly/monthly
-    col3, col4 = st.columns(2)
-
-    with col3:
-        st.subheader("MTBF - Weekly")
-        if wg.empty:
-            st.info("No weekly MTBF data available for the selected filters.")
-        else:
-            if len(wg) > 52:
-                wg_plot = wg.tail(52).copy()
+            monthly_df_local = monthly_df.copy()
+            # use period label in PERIOD_MONTH
+            if "PERIOD_MONTH" in monthly_df_local.columns:
+                monthly_df_local = monthly_df_local.sort_values(by="period_dt" if "period_dt" in monthly_df_local.columns else "PERIOD_MONTH", ascending=False)
+                fig_mttr_m = go.Figure()
+                fig_mttr_m.add_trace(go.Bar(x=monthly_df_local["PERIOD_MONTH"], y=monthly_df_local["MTTR_hours"].round(2), name="MTTR (hrs)"))
+                fig_mttr_m.add_trace(go.Scatter(x=monthly_df_local["PERIOD_MONTH"], y=monthly_df_local["MTTR_hours"].round(2), name="MTTR (line)", mode="lines+markers"))
+                fig_mttr_m.update_layout(xaxis_title="Month", yaxis_title="MTTR (hours)", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02), margin=dict(t=60))
+                st.plotly_chart(fig_mttr_m, use_container_width=True)
             else:
-                wg_plot = wg.copy()
-            fig_mtbf_w = go.Figure()
-            fig_mtbf_w.add_trace(go.Bar(x=wg_plot["period_label"], y=wg_plot["MTBF_hours"].round(2), name="MTBF (hrs)"))
-            fig_mtbf_w.update_layout(
-                xaxis_title="Week",
-                yaxis_title="MTBF (hrs)",
-                legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.2),
-                margin=dict(t=40)
-            )
-            st.plotly_chart(fig_mtbf_w, use_container_width=True)
+                st.info("No PERIOD_MONTH column in monthly reliability data.")
 
-    with col4:
-        st.subheader("MTBF - Monthly")
-        if mg.empty:
-            st.info("No monthly MTBF data available for the selected filters.")
+    st.markdown("---")
+    st.markdown("### MTBF (Mean Time Between Failures)")
+    cols_mtbf = st.columns(2)
+    # Weekly MTBF
+    with cols_mtbf[0]:
+        st.markdown("**MTBF — Weekly**")
+        if weekly_df.empty:
+            st.info("No weekly reliability data available.")
         else:
-            mg_plot = mg.copy()
-            fig_mtbf_m = go.Figure()
-            fig_mtbf_m.add_trace(go.Bar(x=mg_plot["PERIOD_MONTH"], y=mg_plot["MTBF_hours"].round(2), name="MTBF (hrs) - Monthly"))
-            fig_mtbf_m.update_layout(
-                xaxis_title="Period (Month)",
-                yaxis_title="MTBF (hrs)",
-                legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.2),
-                margin=dict(t=40)
-            )
-            st.plotly_chart(fig_mtbf_m, use_container_width=True)
+            try:
+                if "week_start" in weekly_df.columns and weekly_df["week_start"].notna().any():
+                    latest_ws = weekly_df["week_start"].dropna().max()
+                    cutoff = latest_ws - pd.Timedelta(weeks=51)
+                    weekly_df_limited = weekly_df[pd.to_datetime(weekly_df["week_start"]) >= pd.to_datetime(cutoff)].copy()
+                else:
+                    weekly_df_limited = weekly_df.copy()
+            except Exception:
+                weekly_df_limited = weekly_df.copy()
+            if weekly_df_limited.empty:
+                st.info("No weekly reliability data in selected years / range.")
+            else:
+                fig_mtbf_w = go.Figure()
+                fig_mtbf_w.add_trace(go.Bar(x=weekly_df_limited["period_label"], y=weekly_df_limited["MTBF_hours"].round(2), name="MTBF (hrs)"))
+                fig_mtbf_w.add_trace(go.Scatter(x=weekly_df_limited["period_label"], y=weekly_df_limited["MTBF_hours"].round(2), name="MTBF (line)", mode="lines+markers"))
+                fig_mtbf_w.update_layout(xaxis_title="Week", yaxis_title="MTBF (hours)", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02), margin=dict(t=60))
+                st.plotly_chart(fig_mtbf_w, use_container_width=True)
 
-# End of file
+    # Monthly MTBF
+    with cols_mtbf[1]:
+        st.markdown("**MTBF — Monthly**")
+        if monthly_df.empty:
+            st.info("No monthly reliability data available.")
+        else:
+            monthly_df_local = monthly_df.copy()
+            if "PERIOD_MONTH" in monthly_df_local.columns:
+                monthly_df_local = monthly_df_local.sort_values(by="period_dt" if "period_dt" in monthly_df_local.columns else "PERIOD_MONTH", ascending=False)
+                fig_mtbf_m = go.Figure()
+                fig_mtbf_m.add_trace(go.Bar(x=monthly_df_local["PERIOD_MONTH"], y=monthly_df_local["MTBF_hours"].round(2), name="MTBF (hrs)"))
+                fig_mtbf_m.add_trace(go.Scatter(x=monthly_df_local["PERIOD_MONTH"], y=monthly_df_local["MTBF_hours"].round(2), name="MTBF (line)", mode="lines+markers"))
+                fig_mtbf_m.update_layout(xaxis_title="Month", yaxis_title="MTBF (hours)", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02), margin=dict(t=60))
+                st.plotly_chart(fig_mtbf_m, use_container_width=True)
+            else:
+                st.info("No PERIOD_MONTH column in monthly reliability data.")
+
+    st.markdown("---")
+    st.caption("MTBF and MTTR are computed from the 'Data Operational' sheet. If values are missing or NaN, please check the sheet for column names or format mismatches (OPERATIONAL HOURS, MAINTENANCE DELAY, DATE/WEEK/YEAR).")
+
+# end of file

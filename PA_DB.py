@@ -695,13 +695,6 @@ with tab_main:
     kpi_col, donut1_col, donut2_col = st.columns([1,2,2])
     with kpi_col:
         st.subheader("Key KPIs")
-        # small reliability switch button (does NOT auto-switch tabs — user will switch manually)
-        if "reliability_hint" not in st.session_state:
-            st.session_state["reliability_hint"] = False
-        if st.button("Reliability tab", key="reliability_button"):
-            st.session_state["reliability_hint"] = True
-            st.info("Tip: Please manually select the 'Reliability: MTBF & MTTR' tab above to view reliability charts.")
-
         min_caption = None
         max_caption = None
         if "PERIOD_MONTH" in filtered.columns and not filtered["PERIOD_MONTH"].dropna().empty:

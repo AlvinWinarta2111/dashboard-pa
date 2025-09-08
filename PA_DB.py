@@ -566,7 +566,7 @@ def load_operational_sheet(raw_url):
 
     # parse date
     if date_col is not None:
-        df_op["_date_parsed"] = pd.to_datetime(df_op[date_col], errors="coerce')
+        df_op["_date_parsed"] = pd.to_datetime(df_op[date_col], errors="coerce")
     else:
         # try to find a column named DATE
         found = None

@@ -1046,16 +1046,13 @@ with tab_reliability:
 
     # Apply year filter to reliability dataframes as well (global)
     if not weekly_df.empty and selected_years:
-        # weekly_df has YEAR column
         if "YEAR" in weekly_df.columns:
             weekly_df = weekly_df[weekly_df["YEAR"].isin(selected_years)]
 
     if not monthly_df.empty and selected_years:
-        # monthly_df has period_dt if parsed, else fallback: try to extract year from PERIOD_MONTH
         if "period_dt" in monthly_df.columns and monthly_df["period_dt"].notna().any():
             monthly_df = monthly_df[monthly_df["period_dt"].dt.year.isin(selected_years)]
         else:
-            # try to parse year from PERIOD_MONTH string
             def _pm_year(s):
                 try:
                     return int(str(s).split()[-1])
@@ -1065,16 +1062,15 @@ with tab_reliability:
             monthly_df = monthly_df[monthly_df["_yr"].isin(selected_years)]
             monthly_df = monthly_df.drop(columns=["_yr"], errors="ignore")
 
-    # Provide two sets of charts: MTTR weekly+monthly and MTBF weekly+monthly (4 charts)
+    # MTTR charts
     st.markdown("### MTTR (Mean Time To Repair)")
     cols_mttr = st.columns(2)
-    # Weekly MTTR
+
     with cols_mttr[0]:
         st.markdown("**MTTR — Weekly**")
         if weekly_df.empty:
             st.info("No weekly reliability data available.")
         else:
-            # limit to latest 52 weeks (global latest week)
             try:
                 if "week_start" in weekly_df.columns and weekly_df["week_start"].notna().any():
                     latest_ws = weekly_df["week_start"].dropna().max()
@@ -1088,23 +1084,42 @@ with tab_reliability:
                 st.info("No weekly reliability data in selected years / range.")
             else:
                 fig_mttr_w = go.Figure()
-                fig_mttr_w.add_trace(go.Bar(x=weekly_df_limited["period_label"], y=weekly_df_limited["MTTR_hours"].round(2), name="MTTR (hrs)"))
-                fig_mttr_w.update_layout(xaxis_title="Week", yaxis_title="MTTR (hours)", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02), margin=dict(t=60))
+                fig_mttr_w.add_trace(go.Bar(
+                    x=weekly_df_limited["period_label"],
+                    y=weekly_df_limited["MTTR_hours"].round(2),
+                    name="MTTR (hrs)",
+                    marker_color="green"
+                ))
+                fig_mttr_w.update_layout(
+                    xaxis_title="Week", yaxis_title="MTTR (hours)",
+                    legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02),
+                    margin=dict(t=60)
+                )
                 st.plotly_chart(fig_mttr_w, use_container_width=True)
 
-    # Monthly MTTR
     with cols_mttr[1]:
         st.markdown("**MTTR — Monthly**")
         if monthly_df.empty:
             st.info("No monthly reliability data available.")
         else:
             monthly_df_local = monthly_df.copy()
-            # use period label in PERIOD_MONTH
             if "PERIOD_MONTH" in monthly_df_local.columns:
-                monthly_df_local = monthly_df_local.sort_values(by="period_dt" if "period_dt" in monthly_df_local.columns else "PERIOD_MONTH", ascending=False)
+                monthly_df_local = monthly_df_local.sort_values(
+                    by="period_dt" if "period_dt" in monthly_df_local.columns else "PERIOD_MONTH",
+                    ascending=False
+                )
                 fig_mttr_m = go.Figure()
-                fig_mttr_m.add_trace(go.Bar(x=monthly_df_local["PERIOD_MONTH"], y=monthly_df_local["MTTR_hours"].round(2), name="MTTR (hrs)"))
-                fig_mttr_m.update_layout(xaxis_title="Month", yaxis_title="MTTR (hours)", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02), margin=dict(t=60))
+                fig_mttr_m.add_trace(go.Bar(
+                    x=monthly_df_local["PERIOD_MONTH"],
+                    y=monthly_df_local["MTTR_hours"].round(2),
+                    name="MTTR (hrs)",
+                    marker_color="green"
+                ))
+                fig_mttr_m.update_layout(
+                    xaxis_title="Month", yaxis_title="MTTR (hours)",
+                    legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02),
+                    margin=dict(t=60)
+                )
                 st.plotly_chart(fig_mttr_m, use_container_width=True)
             else:
                 st.info("No PERIOD_MONTH column in monthly reliability data.")
@@ -1112,7 +1127,7 @@ with tab_reliability:
     st.markdown("---")
     st.markdown("### MTBF (Mean Time Between Failures)")
     cols_mtbf = st.columns(2)
-    # Weekly MTBF
+
     with cols_mtbf[0]:
         st.markdown("**MTBF — Weekly**")
         if weekly_df.empty:
@@ -1131,11 +1146,19 @@ with tab_reliability:
                 st.info("No weekly reliability data in selected years / range.")
             else:
                 fig_mtbf_w = go.Figure()
-                fig_mtbf_w.add_trace(go.Bar(x=weekly_df_limited["period_label"], y=weekly_df_limited["MTBF_hours"].round(2), name="MTBF (hrs)"))
-                fig_mtbf_w.update_layout(xaxis_title="Week", yaxis_title="MTBF (hours)", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02), margin=dict(t=60))
+                fig_mtbf_w.add_trace(go.Bar(
+                    x=weekly_df_limited["period_label"],
+                    y=weekly_df_limited["MTBF_hours"].round(2),
+                    name="MTBF (hrs)",
+                    marker_color="orange"
+                ))
+                fig_mtbf_w.update_layout(
+                    xaxis_title="Week", yaxis_title="MTBF (hours)",
+                    legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02),
+                    margin=dict(t=60)
+                )
                 st.plotly_chart(fig_mtbf_w, use_container_width=True)
 
-    # Monthly MTBF
     with cols_mtbf[1]:
         st.markdown("**MTBF — Monthly**")
         if monthly_df.empty:
@@ -1143,14 +1166,26 @@ with tab_reliability:
         else:
             monthly_df_local = monthly_df.copy()
             if "PERIOD_MONTH" in monthly_df_local.columns:
-                monthly_df_local = monthly_df_local.sort_values(by="period_dt" if "period_dt" in monthly_df_local.columns else "PERIOD_MONTH", ascending=False)
+                monthly_df_local = monthly_df_local.sort_values(
+                    by="period_dt" if "period_dt" in monthly_df_local.columns else "PERIOD_MONTH",
+                    ascending=False
+                )
                 fig_mtbf_m = go.Figure()
-                fig_mtbf_m.add_trace(go.Bar(x=monthly_df_local["PERIOD_MONTH"], y=monthly_df_local["MTBF_hours"].round(2), name="MTBF (hrs)"))
-                fig_mtbf_m.update_layout(xaxis_title="Month", yaxis_title="MTBF (hours)", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02), margin=dict(t=60))
+                fig_mtbf_m.add_trace(go.Bar(
+                    x=monthly_df_local["PERIOD_MONTH"],
+                    y=monthly_df_local["MTBF_hours"].round(2),
+                    name="MTBF (hrs)",
+                    marker_color="orange"
+                ))
+                fig_mtbf_m.update_layout(
+                    xaxis_title="Month", yaxis_title="MTBF (hours)",
+                    legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02),
+                    margin=dict(t=60)
+                )
                 st.plotly_chart(fig_mtbf_m, use_container_width=True)
             else:
                 st.info("No PERIOD_MONTH column in monthly reliability data.")
 
     st.markdown("---")
-    st.caption("MTBF and MTTR shown is based on the period selected")
+    st.caption("Note: MTBF and MTTR are calculated from operational and maintenance data.")
 # end of file

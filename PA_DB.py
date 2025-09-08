@@ -1046,7 +1046,6 @@ with tab_main:
 # -------------------------
 with tab_reliability:
     st.subheader("Reliability: MTBF & MTTR")
-    st.caption("MTBF = (operational hours) / (count rows) per period. MTTR = (maintenance delay) / (count rows) per period. Source sheet: " + (MT_TR_RELIABILITY_SHEET or "Not found"))
 
     # We will use the cached computed dataframes
     weekly_df = MT_RELIABILITY_WEEKLY_DF.copy() if isinstance(MT_RELIABILITY_WEEKLY_DF, pd.DataFrame) else pd.DataFrame()
@@ -1097,7 +1096,6 @@ with tab_reliability:
             else:
                 fig_mttr_w = go.Figure()
                 fig_mttr_w.add_trace(go.Bar(x=weekly_df_limited["period_label"], y=weekly_df_limited["MTTR_hours"].round(2), name="MTTR (hrs)"))
-                fig_mttr_w.add_trace(go.Scatter(x=weekly_df_limited["period_label"], y=weekly_df_limited["MTTR_hours"].round(2), name="MTTR (line)", mode="lines+markers"))
                 fig_mttr_w.update_layout(xaxis_title="Week", yaxis_title="MTTR (hours)", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02), margin=dict(t=60))
                 st.plotly_chart(fig_mttr_w, use_container_width=True)
 
@@ -1113,7 +1111,6 @@ with tab_reliability:
                 monthly_df_local = monthly_df_local.sort_values(by="period_dt" if "period_dt" in monthly_df_local.columns else "PERIOD_MONTH", ascending=False)
                 fig_mttr_m = go.Figure()
                 fig_mttr_m.add_trace(go.Bar(x=monthly_df_local["PERIOD_MONTH"], y=monthly_df_local["MTTR_hours"].round(2), name="MTTR (hrs)"))
-                fig_mttr_m.add_trace(go.Scatter(x=monthly_df_local["PERIOD_MONTH"], y=monthly_df_local["MTTR_hours"].round(2), name="MTTR (line)", mode="lines+markers"))
                 fig_mttr_m.update_layout(xaxis_title="Month", yaxis_title="MTTR (hours)", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02), margin=dict(t=60))
                 st.plotly_chart(fig_mttr_m, use_container_width=True)
             else:
@@ -1142,7 +1139,6 @@ with tab_reliability:
             else:
                 fig_mtbf_w = go.Figure()
                 fig_mtbf_w.add_trace(go.Bar(x=weekly_df_limited["period_label"], y=weekly_df_limited["MTBF_hours"].round(2), name="MTBF (hrs)"))
-                fig_mtbf_w.add_trace(go.Scatter(x=weekly_df_limited["period_label"], y=weekly_df_limited["MTBF_hours"].round(2), name="MTBF (line)", mode="lines+markers"))
                 fig_mtbf_w.update_layout(xaxis_title="Week", yaxis_title="MTBF (hours)", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02), margin=dict(t=60))
                 st.plotly_chart(fig_mtbf_w, use_container_width=True)
 
@@ -1157,13 +1153,11 @@ with tab_reliability:
                 monthly_df_local = monthly_df_local.sort_values(by="period_dt" if "period_dt" in monthly_df_local.columns else "PERIOD_MONTH", ascending=False)
                 fig_mtbf_m = go.Figure()
                 fig_mtbf_m.add_trace(go.Bar(x=monthly_df_local["PERIOD_MONTH"], y=monthly_df_local["MTBF_hours"].round(2), name="MTBF (hrs)"))
-                fig_mtbf_m.add_trace(go.Scatter(x=monthly_df_local["PERIOD_MONTH"], y=monthly_df_local["MTBF_hours"].round(2), name="MTBF (line)", mode="lines+markers"))
                 fig_mtbf_m.update_layout(xaxis_title="Month", yaxis_title="MTBF (hours)", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02), margin=dict(t=60))
                 st.plotly_chart(fig_mtbf_m, use_container_width=True)
             else:
                 st.info("No PERIOD_MONTH column in monthly reliability data.")
 
     st.markdown("---")
-    st.caption("MTBF and MTTR are computed from the 'Data Operational' sheet. If values are missing or NaN, please check the sheet for column names or format mismatches (OPERATIONAL HOURS, MAINTENANCE DELAY, DATE/WEEK/YEAR).")
-
+    st.caption("MTBF and MTTR shown is based on the period selected")
 # end of file

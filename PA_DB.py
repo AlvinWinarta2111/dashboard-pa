@@ -301,25 +301,244 @@ if df is None:
     st.stop()
 
 # -------------------------
+# -------------------------
+# NEW: Year filter (GLOBAL) — placed at top of sidebar
+# -------------------------
+# derive available years from YEAR column (preferred)
+if "YEAR" in df.columns:
+    try:
+        available_years = sorted([int(x) for x in pd.Series(df["YEAR"].dropna().unique())], reverse=True)
+    except Exception:
+        available_years = []
+else:
+    # fallback: try to derive from DATE column
+    try:
+        dt_series = pd.to_datetime(df["DATE"], errors="coerce")
+        available_years = sorted([int(x) for x in dt_series.dt.year.dropna().unique()], reverse=True)
+    except Exception:
+        available_years = []
+
+# Ensure at least some sensible default (if none found, keep current year)
+if not available_years:
+    try:
+        available_years = [datetime.datetime.now().year]
+    except Exception:
+        available_years = [2025]
+
+# Year multiselect (descending order already ensured)
+selected_years = st.sidebar.multiselect(
+    "Select Year(s)",
+    options=available_years,
+    default=available_years
+)
+
+# Info note below the year filter
+st.sidebar.info("ℹ️ Year filter applies globally to all charts and tables")
+
+# Fallback: if user deselects all, use all years (makes the UI safer)
+if not selected_years:
+    selected_years = available_years.copy()
+
+# Apply selected years to the primary dataframe (global effect)
+try:
+    df = df[df["YEAR"].isin([int(y) for y in selected_years])].copy()
+except Exception:
+    # if something odd happens, keep df unchanged
+    pass
+
+# Build a display label for titles
+if set([int(x) for x in selected_years]) == set([int(x) for x in available_years]):
+    year_label = "All Years"
+else:
+    year_label = ", ".join(str(int(x)) for x in sorted([int(x) for x in selected_years], reverse=True))
+
+# -------------------------
+# NEW: compute MTBF & MTTR from "Data Operational" sheet (COUNT = total rows)
+#    -> Modified to accept selected_years so it respects the global year filter
+# -------------------------
+@st.cache_data(ttl=600)
+def compute_mtbf_mttr_from_url(raw_url, selected_years=None):
+    """
+    Reads the 'Data Operational' sheet (case-insensitive search) from the workbook at raw_url,
+    parses OPERATIONAL HOURS into decimal hours and sums MAINTENANCE DELAY.
+    Uses COUNT = total number of rows in the Data Operational sheet as denominator.
+    If selected_years is provided (list of ints), the function will attempt to filter the
+    'Data Operational' rows by the date/year column to match the selected years.
+    Returns a dict with results and detected column names.
+    """
+    try:
+        xls = pd.ExcelFile(raw_url)
+    except Exception as e:
+        return {"error": f"Could not open workbook: {e}"}
+
+    sheet_name = None
+    for s in xls.sheet_names:
+        if s.strip().lower() == "data operational":
+            sheet_name = s
+            break
+    if sheet_name is None:
+        for s in xls.sheet_names:
+            if "operational" in s.strip().lower():
+                sheet_name = s
+                break
+    if sheet_name is None:
+        return {"error": "Data Operational sheet not found"}
+
+    try:
+        df_op = pd.read_excel(raw_url, sheet_name=sheet_name)
+    except Exception as e:
+        return {"error": f"Could not read sheet '{sheet_name}': {e}"}
+
+    # attempt to detect OPERATIONAL HOURS and MAINTENANCE DELAY columns (case-insensitive)
+    op_col = None
+    maint_col = None
+    for c in df_op.columns:
+        lc = str(c).lower()
+        if ("operat" in lc and "hour" in lc) or ("operational" in lc and "hour" in lc):
+            op_col = c
+            break
+    if op_col is None:
+        for c in df_op.columns:
+            lc = str(c).lower()
+            if "operat" in lc:
+                op_col = c
+                break
+
+    for c in df_op.columns:
+        lc = str(c).lower()
+        if "maint" in lc and "delay" in lc:
+            maint_col = c
+            break
+    if maint_col is None:
+        for c in df_op.columns:
+            lc = str(c).lower()
+            if "maintenance" in lc and "delay" in lc:
+                maint_col = c
+                break
+
+    # detect date column in operational sheet (for filtering by year)
+    date_col = None
+    for c in df_op.columns:
+        if "date" in str(c).lower():
+            date_col = c
+            break
+
+    if date_col is not None:
+        # parse date values (assume day-first typical for dd/mm/yyyy)
+        try:
+            df_op["_date_parsed"] = pd.to_datetime(df_op[date_col], dayfirst=True, errors="coerce")
+        except Exception:
+            df_op["_date_parsed"] = pd.to_datetime(df_op[date_col], errors="coerce")
+    else:
+        # fallback: try to find YEAR column
+        if "YEAR" in df_op.columns:
+            try:
+                df_op["_date_parsed"] = pd.to_datetime(df_op["YEAR"].astype(str) + "-01-01", errors="coerce")
+            except Exception:
+                df_op["_date_parsed"] = pd.Series([pd.NaT] * len(df_op))
+        else:
+            df_op["_date_parsed"] = pd.Series([pd.NaT] * len(df_op))
+
+    # Filter by selected_years if provided
+    if selected_years:
+        try:
+            years_int = [int(y) for y in selected_years]
+            if "_date_parsed" in df_op.columns:
+                df_op = df_op[df_op["_date_parsed"].dt.year.isin(years_int)].copy()
+            elif "YEAR" in df_op.columns:
+                df_op = df_op[pd.to_numeric(df_op["YEAR"], errors="coerce").isin(years_int)].copy()
+        except Exception:
+            pass
+
+    # parsing function for operational hours -> decimal hours
+    def _parse_operational_hours(val):
+        try:
+            if pd.isna(val) or (isinstance(val, str) and str(val).strip() == ""):
+                return float("nan")
+            # numeric values (including Excel time fraction)
+            if isinstance(val, (int, float)) and not isinstance(val, bool):
+                v = float(val)
+                # Excel time fraction
+                if 0 < v < 1:
+                    return v * 24.0
+                return v
+            s = str(val).strip()
+            # time-like string e.g. "08:30" or "8:30:00"
+            if ":" in s:
+                try:
+                    td = pd.to_timedelta(s)
+                    return td.total_seconds() / 3600.0
+                except Exception:
+                    pass
+            # numeric string
+            try:
+                return float(s)
+            except Exception:
+                return float("nan")
+        except Exception:
+            return float("nan")
+
+    if op_col is not None:
+        df_op["_op_hours_dec"] = df_op[op_col].apply(_parse_operational_hours)
+    else:
+        df_op["_op_hours_dec"] = pd.Series([float("nan")] * len(df_op))
+
+    if maint_col is not None:
+        df_op["_maint_delay_num"] = pd.to_numeric(df_op[maint_col], errors="coerce")
+    else:
+        df_op["_maint_delay_num"] = pd.Series([float("nan")] * len(df_op))
+
+    total_rows_op_sheet = len(df_op)
+    total_operational_hours_op_sheet = float(df_op["_op_hours_dec"].sum(skipna=True))
+    total_maintenance_delay_op_sheet = float(df_op["_maint_delay_num"].sum(skipna=True))
+
+    if total_rows_op_sheet > 0:
+        mtbf_hours = total_operational_hours_op_sheet / total_rows_op_sheet
+        mttr_hours = total_maintenance_delay_op_sheet / total_rows_op_sheet
+    else:
+        mtbf_hours = None
+        mttr_hours = None
+
+    return {
+        "sheet_name": sheet_name,
+        "operational_hours_column": op_col,
+        "maintenance_delay_column": maint_col,
+        "total_rows": total_rows_op_sheet,
+        "total_operational_hours": total_operational_hours_op_sheet,
+        "total_maintenance_delay": total_maintenance_delay_op_sheet,
+        "MTBF_hours": mtbf_hours,
+        "MTTR_hours": mttr_hours,
+    }
+
+# -------------------------
+# NOTE: We call compute_mtbf_mttr_from_url AFTER the year filter is applied above,
+# so MTBF/MTTR reflect the same selected years as the rest of the dashboard.
+# -------------------------
+_mtbf_mttr_res = compute_mtbf_mttr_from_url(RAW_URL, selected_years=selected_years)
+
+# Expose variables (global names that won't clash with existing variables)
+MTBF_GLOBAL_HOURS = _mtbf_mttr_res.get("MTBF_hours") if isinstance(_mtbf_mttr_res, dict) else None
+MTTR_GLOBAL_HOURS = _mtbf_mttr_res.get("MTTR_hours") if isinstance(_mtbf_mttr_res, dict) else None
+MTBF_GLOBAL_HOURS_ROUNDED = round(MTBF_GLOBAL_HOURS, 2) if (MTBF_GLOBAL_HOURS is not None) else None
+MTTR_GLOBAL_HOURS_ROUNDED = round(MTTR_GLOBAL_HOURS, 2) if (MTTR_GLOBAL_HOURS is not None) else None
+
+# Also keep totals & column names (useful later if you want to display them)
+MTBF_SOURCE_SHEET = _mtbf_mttr_res.get("sheet_name") if isinstance(_mtbf_mttr_res, dict) else None
+MTBF_OP_HOURS_COL = _mtbf_mttr_res.get("operational_hours_column") if isinstance(_mtbf_mttr_res, dict) else None
+MTBF_MAINT_DELAY_COL = _mtbf_mttr_res.get("maintenance_delay_column") if isinstance(_mtbf_mttr_res, dict) else None
+MTBF_TOTAL_ROWS = _mtbf_mttr_res.get("total_rows") if isinstance(_mtbf_mttr_res, dict) else None
+MTBF_TOTAL_OP_HOURS = _mtbf_mttr_res.get("total_operational_hours") if isinstance(_mtbf_mttr_res, dict) else None
+MTBF_TOTAL_MAINT_DELAY = _mtbf_mttr_res.get("total_maintenance_delay") if isinstance(_mtbf_mttr_res, dict) else None
+
+# -------------------------
 # Sidebar Filters
 # -------------------------
 st.sidebar.header("Filters & Options")
 granularity = st.sidebar.selectbox("Time granularity", options=["WEEK", "PERIOD_MONTH"], index=1)
 
-# -------------------------
-# Build month list from PERIOD_MONTH (chronologically) — this fixes mismatch when weeks were reassigned to later month
-# -------------------------
+# Build month list and sort chronologically using MONTH + YEAR (keep "JAN 2024" strings as-is)
 months_available = []
-if "PERIOD_MONTH" in df.columns:
-    unique_pm = pd.Series(df["PERIOD_MONTH"].dropna().astype(str).str.strip().unique())
-    # try to parse them to datetime for sorting
-    parsed = pd.to_datetime(unique_pm, format="%b %Y", errors="coerce")
-    if parsed.notna().any():
-        months_df = pd.DataFrame({"PERIOD_MONTH": unique_pm.values, "period_dt": parsed.values})
-        months_df = months_df.sort_values("period_dt")
-        months_available = months_df["PERIOD_MONTH"].tolist()
-# fallback to previous MONTH+YEAR logic if PERIOD_MONTH parsing failed
-if not months_available and "MONTH" in df.columns and "YEAR" in df.columns:
+if "MONTH" in df.columns and "YEAR" in df.columns:
     month_to_idx = {
         "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
         "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12
@@ -340,18 +559,26 @@ if not months_available and "MONTH" in df.columns and "YEAR" in df.columns:
         if m_upper not in month_to_idx:
             continue
         tmp.append((y_int, month_to_idx[m_upper], f"{m_upper} {y_int}"))
+    # sort chronologically and deduplicate while preserving order
     tmp_sorted = sorted(set(tmp), key=lambda x: (x[0], x[1]))
     months_available = [t[2] for t in tmp_sorted]
 
+# If PERIOD_MONTH already present as strings (maybe different casing), ensure we include them too but keep canonical "MON YYYY".
+# We'll use months_available above; if it's empty but PERIOD_MONTH exists, fallback to unique PERIOD_MONTH.
+if not months_available and "PERIOD_MONTH" in df.columns:
+    months_available = pd.Series(df["PERIOD_MONTH"].unique()).dropna().astype(str).str.strip().tolist()
+
 # Default to latest available month if exists
 if months_available:
+    # latest by sorting the month tuples
+    last = months_available[-1]
     try:
         default_idx = len(months_available) - 1
     except Exception:
         default_idx = 0
 else:
     default_idx = 0
-
+    
 months = ["All"] + months_available
 selected_month = st.sidebar.selectbox("MONTH", months, index=0)
 
@@ -467,7 +694,7 @@ with kpi_col:
         st.write("")
 
 with donut1_col:
-    st.subheader("Delay by Category")
+    st.subheader(f"Delay by Category ({year_label})")
     if "CATEGORY" in filtered.columns:
         donut_data = filtered.groupby("CATEGORY", dropna=False)["DELAY"].sum().reset_index().sort_values("DELAY", ascending=False)
         if not donut_data.empty:
@@ -482,7 +709,7 @@ with donut1_col:
         st.info("No category data available.")
 
 with donut2_col:
-    st.subheader("Scheduled vs Unscheduled (Maintenance only)")
+    st.subheader(f"Scheduled vs Unscheduled (Maintenance only) ({year_label})")
     if "MTN_DELAY_TYPE" in filtered.columns:
         maint_df = filtered[filtered["CATEGORY"] == "Maintenance"].copy()
         if not maint_df.empty:
@@ -505,10 +732,10 @@ st.markdown("---")
 # -------------------------
 # Trend Analysis
 # -------------------------
-st.subheader("Trend: Total Delay Hours vs PA%")
+st.subheader(f"Trend: Total Delay Hours vs PA% ({year_label})")
 group_field = granularity
 
-# ---------- (UPDATED) Use GLOBAL latest week for 52-week cutoff ----------
+# ---------- (UPDATED) Use latest week in the YEAR-filtered df for 52-week cutoff ----------
 if group_field == "WEEK":
     latest_week_start_global = df["WEEK_START"].dropna().max() if "WEEK_START" in df.columns else pd.NaT
     if pd.isna(latest_week_start_global):
@@ -624,7 +851,7 @@ st.markdown("---")
 # -------------------------
 # Pareto by Equipment
 # -------------------------
-st.subheader("Top Delay by Equipment (Pareto)")
+st.subheader(f"Top Delay by Equipment (Pareto) ({year_label})")
 
 if "EQUIPMENT_DESC" in filtered.columns and filtered["EQUIPMENT_DESC"].notna().any():
     equipment_key = "EQUIPMENT_DESC"
@@ -700,7 +927,7 @@ else:
 # -------------------------
 # Drill-down table (directly showing rows for the selected category)
 # -------------------------
-st.subheader("Drill-down data (filtered by selected category)")
+st.subheader(f"Drill-down data (filtered by selected category) ({year_label})")
 
 details_df = drill_df_base.copy()
 

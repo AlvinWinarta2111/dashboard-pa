@@ -1040,11 +1040,11 @@ with tab_main:
 with tab_reliability:
     st.subheader("Reliability: MTBF & MTTR")
 
-    # We will use the cached computed dataframes
+    # Cached computed dataframes
     weekly_df = MT_RELIABILITY_WEEKLY_DF.copy() if isinstance(MT_RELIABILITY_WEEKLY_DF, pd.DataFrame) else pd.DataFrame()
     monthly_df = MT_RELIABILITY_MONTHLY_DF.copy() if isinstance(MT_RELIABILITY_MONTHLY_DF, pd.DataFrame) else pd.DataFrame()
 
-    # Apply year filter to reliability dataframes as well (global)
+    # Apply year filter (global)
     if not weekly_df.empty and selected_years:
         if "YEAR" in weekly_df.columns:
             weekly_df = weekly_df[weekly_df["YEAR"].isin(selected_years)]
@@ -1080,9 +1080,12 @@ with tab_reliability:
                     weekly_df_limited = weekly_df.copy()
             except Exception:
                 weekly_df_limited = weekly_df.copy()
+
             if weekly_df_limited.empty:
                 st.info("No weekly reliability data in selected years / range.")
             else:
+                # sort ascending by week
+                weekly_df_limited = weekly_df_limited.sort_values(by="week_start", ascending=True)
                 fig_mttr_w = go.Figure()
                 fig_mttr_w.add_trace(go.Bar(
                     x=weekly_df_limited["period_label"],
@@ -1104,9 +1107,10 @@ with tab_reliability:
         else:
             monthly_df_local = monthly_df.copy()
             if "PERIOD_MONTH" in monthly_df_local.columns:
+                # sort ascending by period
                 monthly_df_local = monthly_df_local.sort_values(
                     by="period_dt" if "period_dt" in monthly_df_local.columns else "PERIOD_MONTH",
-                    ascending=False
+                    ascending=True
                 )
                 fig_mttr_m = go.Figure()
                 fig_mttr_m.add_trace(go.Bar(
@@ -1142,9 +1146,12 @@ with tab_reliability:
                     weekly_df_limited = weekly_df.copy()
             except Exception:
                 weekly_df_limited = weekly_df.copy()
+
             if weekly_df_limited.empty:
                 st.info("No weekly reliability data in selected years / range.")
             else:
+                # sort ascending by week
+                weekly_df_limited = weekly_df_limited.sort_values(by="week_start", ascending=True)
                 fig_mtbf_w = go.Figure()
                 fig_mtbf_w.add_trace(go.Bar(
                     x=weekly_df_limited["period_label"],
@@ -1166,9 +1173,10 @@ with tab_reliability:
         else:
             monthly_df_local = monthly_df.copy()
             if "PERIOD_MONTH" in monthly_df_local.columns:
+                # sort ascending by period
                 monthly_df_local = monthly_df_local.sort_values(
                     by="period_dt" if "period_dt" in monthly_df_local.columns else "PERIOD_MONTH",
-                    ascending=False
+                    ascending=True
                 )
                 fig_mtbf_m = go.Figure()
                 fig_mtbf_m.add_trace(go.Bar(

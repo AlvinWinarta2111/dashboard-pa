@@ -3,6 +3,6 @@ pandas
 plotly
 openpyxl
 streamlit-aggrid
-kaleido
+html2image
 reportlab
 Pillow

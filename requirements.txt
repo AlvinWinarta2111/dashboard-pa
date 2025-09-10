@@ -4,5 +4,5 @@ plotly
 openpyxl
 streamlit-aggrid
 kaleido
-pip install reportlab
+reportlab
 Pillow

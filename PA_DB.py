@@ -606,7 +606,7 @@ MTBF_GLOBAL_HOURS_ROUNDED = round(MTBF_GLOBAL_HOURS, 2) if (MTBF_GLOBAL_HOURS is
 MTTR_GLOBAL_HOURS_ROUNDED = round(MTTR_GLOBAL_HOURS, 2) if (MTTR_GLOBAL_HOURS is not None) else None
 
 # -----------------------------
-# PDF Export UI (button) - rebuild charts on demand
+# PDF Export UI (button)
 # -----------------------------
 st.sidebar.markdown("---")
 st.sidebar.subheader("Export report (PDF)")
@@ -614,18 +614,24 @@ st.sidebar.subheader("Export report (PDF)")
 if REPORTLAB_AVAILABLE:
     if st.sidebar.button("Generate PDF"):
 
-        from io import BytesIO
-        import plotly.express as px
-
         # -----------------------------
-        # 1. Recompute filtered data for PDF
+        # 1. Fetch current selections safely
         # -----------------------------
-        filtered_pdf = df.copy()
         selected_month = st.session_state.get("selected_month", "All")
         selected_years = st.session_state.get("selected_years", [])
+
+        # -----------------------------
+        # 2. Filter data for PDF
+        # -----------------------------
+        filtered_pdf = df.copy()
         if selected_month != "All" and selected_month != "":
             filtered_pdf = filtered_pdf[filtered_pdf["PERIOD_MONTH"] == selected_month]
+        if selected_years:
+            filtered_pdf = filtered_pdf[filtered_pdf["PERIOD_YEAR"].isin(selected_years)]
 
+        # -----------------------------
+        # 3. Compute KPI values
+        # -----------------------------
         total_delay = filtered_pdf["DELAY"].sum()
         available_time = None
         try:
@@ -637,11 +643,11 @@ if REPORTLAB_AVAILABLE:
             available_time = None
 
         PA = max(0, 1 - total_delay / available_time) if (available_time and available_time > 0) else None
-        maintenance_delay = filtered_pdf[filtered_pdf["CATEGORY"] == "Maintenance"]["DELAY"].sum() if "CATEGORY" in filtered_pdf.columns else 0
+        maintenance_delay = filtered_pdf[filtered_pdf.get("CATEGORY") == "Maintenance"]["DELAY"].sum() if "CATEGORY" in filtered_pdf.columns else 0
         MA = max(0, 1 - maintenance_delay / available_time) if (available_time and available_time > 0) else None
 
         # -----------------------------
-        # 2. Build KPI table for PDF
+        # 4. Build KPI table for PDF
         # -----------------------------
         kpi_table_data = [
             ["KPI", "Value"],
@@ -652,62 +658,41 @@ if REPORTLAB_AVAILABLE:
         ]
 
         # -----------------------------
-        # 3. Build charts on-the-fly
+        # 5. Rebuild charts based on filtered data
         # -----------------------------
+        def rebuild_figures_for_pdf(filtered_pdf):
+            import plotly.express as px
+            figs = []
+
+            # Trend chart
+            if "PERIOD_MONTH" in filtered_pdf.columns and "DELAY" in filtered_pdf.columns:
+                df_trend = filtered_pdf.groupby("PERIOD_MONTH")["DELAY"].sum().reset_index()
+                fig_trend = px.line(df_trend, x="PERIOD_MONTH", y="DELAY", title="Delay Trend")
+                figs.append(fig_trend)
+
+            # Pareto chart
+            if "CATEGORY" in filtered_pdf.columns and "DELAY" in filtered_pdf.columns:
+                df_pareto = filtered_pdf.groupby("CATEGORY")["DELAY"].sum().reset_index()
+                df_pareto = df_pareto.sort_values("DELAY", ascending=False)
+                df_pareto["cum_percent"] = df_pareto["DELAY"].cumsum()/df_pareto["DELAY"].sum()*100
+                fig_pareto = px.bar(df_pareto, x="CATEGORY", y="DELAY", title="Pareto Chart")
+                figs.append(fig_pareto)
+
+            # Add other charts (MTTR, MTBF) if needed using similar pattern
+
+            return figs
+
+        figs = rebuild_figures_for_pdf(filtered_pdf)
         figs_bytes = []
-
-        try:
-            # Trend figure
-            fig_trend = px.line(filtered_pdf, x="PERIOD_MONTH", y="DELAY", title="Delay Trend")
+        from io import BytesIO
+        for fig in figs:
             buf = BytesIO()
-            fig_trend.write_image(buf, format="png", scale=2)
+            fig.write_image(buf, format="png", scale=2)
             buf.seek(0)
             figs_bytes.append(buf.read())
-
-            # Pareto figure
-            pareto_data = filtered_pdf.groupby("CATEGORY")["DELAY"].sum().reset_index().sort_values("DELAY", ascending=False)
-            fig_pareto = px.bar(pareto_data, x="CATEGORY", y="DELAY", title="Delay Pareto")
-            buf = BytesIO()
-            fig_pareto.write_image(buf, format="png", scale=2)
-            buf.seek(0)
-            figs_bytes.append(buf.read())
-
-            # MTTR weekly
-            if "MTTR_W" in filtered_pdf.columns:
-                fig_mttr_w = px.bar(filtered_pdf, x="PERIOD_WEEK", y="MTTR_W", title="MTTR Weekly")
-                buf = BytesIO()
-                fig_mttr_w.write_image(buf, format="png", scale=2)
-                buf.seek(0)
-                figs_bytes.append(buf.read())
-
-            # MTTR monthly
-            if "MTTR_M" in filtered_pdf.columns:
-                fig_mttr_m = px.bar(filtered_pdf, x="PERIOD_MONTH", y="MTTR_M", title="MTTR Monthly")
-                buf = BytesIO()
-                fig_mttr_m.write_image(buf, format="png", scale=2)
-                buf.seek(0)
-                figs_bytes.append(buf.read())
-
-            # MTBF weekly
-            if "MTBF_W" in filtered_pdf.columns:
-                fig_mtbf_w = px.bar(filtered_pdf, x="PERIOD_WEEK", y="MTBF_W", title="MTBF Weekly")
-                buf = BytesIO()
-                fig_mtbf_w.write_image(buf, format="png", scale=2)
-                buf.seek(0)
-                figs_bytes.append(buf.read())
-
-            # MTBF monthly
-            if "MTBF_M" in filtered_pdf.columns:
-                fig_mtbf_m = px.bar(filtered_pdf, x="PERIOD_MONTH", y="MTBF_M", title="MTBF Monthly")
-                buf = BytesIO()
-                fig_mtbf_m.write_image(buf, format="png", scale=2)
-                buf.seek(0)
-                figs_bytes.append(buf.read())
-        except Exception as e:
-            st.sidebar.error(f"Failed to build charts for PDF: {e}")
 
         # -----------------------------
-        # 4. Build PDF
+        # 6. Build PDF
         # -----------------------------
         def _build_pdf_bytes(title, kpi_table_data, png_bytes_list):
             from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
@@ -719,7 +704,6 @@ if REPORTLAB_AVAILABLE:
             elements = []
             styles = getSampleStyleSheet()
             title_style = styles.get("Heading1")
-            normal_style = styles.get("Normal")
 
             # Title
             elements.append(Paragraph(title, title_style))
@@ -760,7 +744,7 @@ if REPORTLAB_AVAILABLE:
             st.sidebar.error("Failed to generate PDF. Check logs.")
 
     # -----------------------------
-    # 5. Download button
+    # 7. Download button
     # -----------------------------
     if st.session_state.get('_last_pdf') is not None:
         st.sidebar.download_button(
@@ -769,6 +753,7 @@ if REPORTLAB_AVAILABLE:
             file_name="PA_report.pdf",
             mime="application/pdf"
         )
+
 
 # -------------------------
 # Tabs: Main Dashboard and Reliability (moved near top as requested)

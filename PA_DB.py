@@ -1196,4 +1196,220 @@ with tab_reliability:
 
     st.markdown("---")
     st.caption("Note: MTBF and MTTR are calculated from operational and maintenance data.")
-# end of file
+
+
+# -------------------------
+# Export PDF summary (Sidebar) - add after your sidebar controls
+# -------------------------
+import io
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.units import mm
+from reportlab.pdfgen import canvas
+from PIL import Image
+import base64
+import textwrap
+
+# Sidebar small inputs for PDF export
+with st.sidebar.expander("Report export", expanded=False):
+    pdf_prepared_by = st.text_input("Prepared by (for PDF)", value="")
+    pdf_include_charts = st.checkbox("Include charts in PDF", value=True)
+    pdf_page_orientation = st.selectbox("Page orientation", options=["Portrait", "Landscape"], index=0)
+    if st.button("Export report as PDF"):
+        # Export action
+        def _safe_fig_to_png_bytes(fig):
+            """Return PNG bytes from a plotly figure using kaleido, or None if fail."""
+            try:
+                # fig.to_image requires kaleido installed
+                png_bytes = fig.to_image(format="png", engine="kaleido")
+                return png_bytes
+            except Exception as e:
+                # fallback: try to serialize without images
+                return None
+
+        def _write_pdf_bytes(title, prepared_by, kpis, fig_pngs, orientation="Portrait"):
+            """
+            Create a multi-page PDF as bytes.
+            - kpis: list of (label, value) tuples
+            - fig_pngs: list of (title, png_bytes)
+            """
+            buf = io.BytesIO()
+            pagesize = A4
+            if orientation == "Landscape":
+                pagesize = landscape(A4)
+            c = canvas.Canvas(buf, pagesize=pagesize)
+            width, height = pagesize
+
+            # Helper layout
+            margin = 15 * mm
+            y = height - margin
+
+            # Page 1: title + KPIs + filters
+            c.setFont("Helvetica-Bold", 16)
+            c.drawString(margin, y, title)
+            y -= 12 * mm
+
+            if prepared_by:
+                c.setFont("Helvetica", 9)
+                c.drawString(margin, y, f"Prepared by: {prepared_by}")
+                y -= 8 * mm
+
+            # Add Filters info if variables exist (safe attempts)
+            try:
+                filters_txt = []
+                # selected_years may or may not exist — try gracefully
+                if "selected_years" in globals():
+                    sy = globals().get("selected_years")
+                    if sy:
+                        filters_txt.append("Years: " + (", ".join(map(str, sy))))
+                if "selected_month" in globals():
+                    sm = globals().get("selected_month")
+                    if sm:
+                        filters_txt.append("Month: " + str(sm))
+                if "granularity" in globals():
+                    filters_txt.append("Granularity: " + str(glan := globals().get("granularity")))
+                if filters_txt:
+                    c.setFont("Helvetica", 9)
+                    for f in filters_txt:
+                        c.drawString(margin, y, f)
+                        y -= 6 * mm
+            except Exception:
+                pass
+
+            y -= 6 * mm
+            # KPIs block
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(margin, y, "Key KPIs")
+            y -= 8 * mm
+            c.setFont("Helvetica", 10)
+            for label, val in kpis:
+                # narrow the line if too long
+                line = f"{label}: {val}"
+                c.drawString(margin, y, line)
+                y -= 6 * mm
+                if y < 50 * mm:
+                    c.showPage()
+                    y = height - margin
+            c.showPage()
+
+            # Next pages: add figures (one figure per page, full width)
+            for ftitle, fpng in fig_pngs:
+                if not fpng:
+                    # skip missing
+                    continue
+                # convert bytes to PIL Image
+                try:
+                    im = Image.open(io.BytesIO(fpng))
+                    # Resize to fit printable area while preserving aspect ratio
+                    max_w = width - 2 * margin
+                    max_h = height - 2 * margin
+                    im_w, im_h = im.size
+                    ratio = min(max_w / im_w, max_h / im_h, 1.0)
+                    disp_w = im_w * ratio
+                    disp_h = im_h * ratio
+                    # Save to temporary bytes in PNG
+                    img_buf = io.BytesIO()
+                    im.save(img_buf, format="PNG")
+                    img_buf.seek(0)
+                    # Draw title
+                    c.setFont("Helvetica-Bold", 12)
+                    c.drawString(margin, height - margin, ftitle)
+                    # Draw image centered horizontally
+                    x_pos = (width - disp_w) / 2
+                    y_pos = (height - disp_h) / 2 - 10
+                    c.drawImage(ImageReader(img_buf), x_pos, y_pos, width=disp_w, height=disp_h)
+                    c.showPage()
+                except Exception:
+                    # If anything fails while placing images, skip gracefully
+                    continue
+
+            # Footer page with note
+            c.setFont("Helvetica", 9)
+            c.drawString(margin, margin, "Note: MTBF and MTTR are calculated from operational data.")
+            c.save()
+            buf.seek(0)
+            return buf.read()
+
+        # Build KPI list based on variables present (safe checks)
+        kpis_for_pdf = []
+        try:
+            if "PA" in globals() and PA is not None:
+                kpis_for_pdf.append(("Physical Availability (PA)", f"{PA:.2%}"))
+            else:
+                kpis_for_pdf.append(("Physical Availability (PA)", "N/A"))
+        except Exception:
+            kpis_for_pdf.append(("Physical Availability (PA)", "N/A"))
+        try:
+            if "MA" in globals() and MA is not None:
+                kpis_for_pdf.append(("Mechanical Availability (MA)", f"{MA:.2%}"))
+            else:
+                kpis_for_pdf.append(("Mechanical Availability (MA)", "N/A"))
+        except Exception:
+            kpis_for_pdf.append(("Mechanical Availability (MA)", "N/A"))
+        try:
+            if "total_delay" in globals():
+                kpis_for_pdf.append(("Total Delay (hrs)", f"{total_delay:.2f}"))
+            else:
+                kpis_for_pdf.append(("Total Delay (hrs)", "N/A"))
+        except Exception:
+            kpis_for_pdf.append(("Total Delay (hrs)", "N/A"))
+        try:
+            if "available_time" in globals() and available_time:
+                kpis_for_pdf.append(("Total Available Time (hrs)", f"{available_time:.2f}"))
+            else:
+                kpis_for_pdf.append(("Total Available Time (hrs)", "N/A"))
+        except Exception:
+            kpis_for_pdf.append(("Total Available Time (hrs)", "N/A"))
+        # MTBF/MTTR global variables if present
+        try:
+            if "MTBF_GLOBAL_HOURS_ROUNDED" in globals() and MTBF_GLOBAL_HOURS_ROUNDED is not None:
+                kpis_for_pdf.append(("MTBF (hrs)", f"{MTBF_GLOBAL_HOURS_ROUNDED:.2f}"))
+            else:
+                kpis_for_pdf.append(("MTBF (hrs)", "N/A"))
+        except Exception:
+            kpis_for_pdf.append(("MTBF (hrs)", "N/A"))
+        try:
+            if "MTTR_GLOBAL_HOURS_ROUNDED" in globals() and MTTR_GLOBAL_HOURS_ROUNDED is not None:
+                kpis_for_pdf.append(("MTTR (hrs)", f"{MTTR_GLOBAL_HOURS_ROUNDED:.2f}"))
+            else:
+                kpis_for_pdf.append(("MTTR (hrs)", "N/A"))
+        except Exception:
+            kpis_for_pdf.append(("MTTR (hrs)", "N/A"))
+
+        # Collect figure PNG bytes for charts if requested
+        fig_pngs = []
+        if pdf_include_charts:
+            # Try to capture known figure objects (names used in your app)
+            possible_fig_names = [
+                ("Trend: PA vs Delay", "fig_trend"),
+                ("Pareto: Top Delay by Equipment", "fig_pareto"),
+                ("MTTR - Weekly", "fig_mttr_w"),
+                ("MTTR - Monthly", "fig_mttr_m"),
+                ("MTBF - Weekly", "fig_mtbf_w"),
+                ("MTBF - Monthly", "fig_mtbf_m"),
+            ]
+            for title, varname in possible_fig_names:
+                try:
+                    fig_obj = globals().get(varname, None)
+                    if fig_obj is None:
+                        # maybe local names: try retrieving from st.session_state
+                        fig_obj = st.session_state.get(varname) if varname in st.session_state else None
+                    if fig_obj is not None:
+                        png = _safe_fig_to_png_bytes(fig_obj)
+                        fig_pngs.append((title, png))
+                except Exception:
+                    # skip silently
+                    continue
+
+        # Build PDF bytes
+        pdf_bytes = _write_pdf_bytes("Physical Availability Dashboard — Summary", pdf_prepared_by, kpis_for_pdf, fig_pngs,
+                                    orientation=pdf_page_orientation)
+
+        # Provide as download
+        st.success("PDF generated — click to download")
+        st.download_button(
+            label="Download Report as PDF",
+            data=pdf_bytes,
+            file_name="PA_dashboard_summary.pdf",
+            mime="application/pdf"
+        )
+

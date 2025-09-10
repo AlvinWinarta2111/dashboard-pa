@@ -43,21 +43,11 @@ st.set_page_config(page_title="Physical Availability - Data Delay Time", layout=
 # Helpers: figure -> PNG bytes (kaleido)
 # -------------------------
 def _fig_to_png_bytes(fig):
-    """Convert plotly figure to PNG bytes; returns bytes or None."""
     try:
-        # try kaleido engine explicitly first
-        img_bytes = fig.to_image(format="png", engine="kaleido")
-        if isinstance(img_bytes, (bytes, bytearray)):
-            return bytes(img_bytes)
-    except Exception:
-        try:
-            # fallback to default matplotlib engine if available
-            img_bytes = fig.to_image(format="png")
-            if isinstance(img_bytes, (bytes, bytearray)):
-                return bytes(img_bytes)
-        except Exception:
-            return None
-    return None
+        return fig.to_image(format="png")  # no engine arg
+    except Exception as e:
+        st.warning(f"Chart export failed: {e}")
+        return None
 
 def _create_pdf_bytes(title, kpi_text, png_bytes_list):
     """

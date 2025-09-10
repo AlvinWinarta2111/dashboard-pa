@@ -614,83 +614,123 @@ st.sidebar.header("Filters & Options")
 st.sidebar.markdown("---")
 st.sidebar.subheader("Export report (PDF)")
 
-# Note: KPI text for PDF is composed at the moment of generation (to ensure it uses current selections)
 if REPORTLAB_AVAILABLE:
     if st.sidebar.button("Generate PDF"):
-        # Build KPI header text dynamically (safe)
+
+        # -----------------------------
+        # 1. Recompute filtered data for PDF
+        # -----------------------------
+        filtered_pdf = df.copy()
+        if selected_month != "All" and selected_month != "":
+            filtered_pdf = filtered_pdf[filtered_pdf["PERIOD_MONTH"] == selected_month]
+        if selected_years and "YEAR" in filtered_pdf.columns:
+            filtered_pdf = filtered_pdf[filtered_pdf["YEAR"].isin(selected_years)]
+
+        total_delay = filtered_pdf["DELAY"].sum()
+        available_time = None
         try:
-            kpi_text = ""
-            try:
-                kpi_text += f"PA: {PA:.2%}\n"
-            except Exception:
-                kpi_text += "PA: N/A\n"
-            try:
-                kpi_text += f"MA: {MA:.2%}\n"
-            except Exception:
-                kpi_text += "MA: N/A\n"
-            try:
-                kpi_text += f"Total Delay (selected): {total_delay:.2f} hrs\n"
-            except Exception:
-                kpi_text += "Total Delay (selected): N/A\n"
-            try:
-                if available_time:
-                    kpi_text += f"Total Available Time (selected): {available_time:.2f} hrs\n"
-            except Exception:
-                pass
+            if "AVAILABLE_TIME_MONTH" in filtered_pdf.columns and filtered_pdf["AVAILABLE_TIME_MONTH"].notna().any():
+                available_time = filtered_pdf.groupby("PERIOD_MONTH")["AVAILABLE_TIME_MONTH"].max().dropna().sum()
+            elif "AVAILABLE_HOURS" in filtered_pdf.columns and filtered_pdf["AVAILABLE_HOURS"].notna().any():
+                available_time = filtered_pdf.groupby("PERIOD_MONTH")["AVAILABLE_HOURS"].max().dropna().sum()
         except Exception:
-            kpi_text = ""
-        # Collect cached PNGs (in display order)
+            available_time = None
+
+        PA = max(0, 1 - total_delay / available_time) if (available_time and available_time > 0) else None
+        maintenance_delay = filtered_pdf[filtered_pdf["CATEGORY"] == "Maintenance"]["DELAY"].sum() if "CATEGORY" in filtered_pdf.columns else 0
+        MA = max(0, 1 - maintenance_delay / available_time) if (available_time and available_time > 0) else None
+
+        # -----------------------------
+        # 2. Build KPI table for PDF
+        # -----------------------------
+        kpi_table_data = [
+            ["KPI", "Value"],
+            ["PA", f"{PA:.2%}" if PA is not None else "N/A"],
+            ["MA", f"{MA:.2%}" if MA is not None else "N/A"],
+            ["Total Delay (hrs)", f"{total_delay:.2f}"],
+            ["Available Time (hrs)", f"{available_time:.2f}" if available_time else "N/A"]
+        ]
+
+        # -----------------------------
+        # 3. Ensure figures exist in session_state or rebuild them
+        # -----------------------------
         figs_bytes = []
-        for key in ['pdf_fig_trend','pdf_fig_pareto','pdf_fig_mttr_w','pdf_fig_mttr_m','pdf_fig_mtbf_w','pdf_fig_mtbf_m']:
-            v = st.session_state.get(key)
-            if v:
-                figs_bytes.append(v)
-        # Build PDF (simple)
-        def _build_pdf_bytes(title, kpi_text, png_bytes_list):
-            if not REPORTLAB_AVAILABLE:
-                return None
+        chart_keys = ['pdf_fig_trend','pdf_fig_pareto','pdf_fig_mttr_w','pdf_fig_mttr_m','pdf_fig_mtbf_w','pdf_fig_mtbf_m']
+
+        for key in chart_keys:
+            fig = st.session_state.get(key)
+            if fig is None:
+                # Optionally rebuild chart here if needed
+                continue
+            # Convert Plotly figure to PNG bytes
+            buf = BytesIO()
+            fig.write_image(buf, format="png", scale=2)
+            buf.seek(0)
+            figs_bytes.append(buf.read())
+
+        # -----------------------------
+        # 4. Build PDF
+        # -----------------------------
+        def _build_pdf_bytes(title, kpi_table_data, png_bytes_list):
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.styles import getSampleStyleSheet
+            from reportlab.lib import colors
+
             elements = []
-            styles = getSampleStyleSheet() if getSampleStyleSheet else None
-            if styles:
-                title_style = styles.get("Heading1")
-                normal_style = styles.get("Normal")
-            else:
-                title_style = None
-                normal_style = None
-            if title_style is not None:
-                elements.append(Paragraph(title, title_style))
-            if normal_style is not None and kpi_text:
-                elements.append(Spacer(1, 0.1 * inch))
-                elements.append(Paragraph(kpi_text.replace("\n","<br/>"), normal_style))
+            styles = getSampleStyleSheet()
+            title_style = styles.get("Heading1")
+            normal_style = styles.get("Normal")
+
+            # Title
+            elements.append(Paragraph(title, title_style))
             elements.append(Spacer(1, 0.2 * inch))
+
+            # KPI Table
+            t = Table(kpi_table_data)
+            t.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.grey),
+                ('TEXTCOLOR',(0,0),(-1,0),colors.whitesmoke),
+                ('ALIGN',(0,0),(-1,-1),'CENTER'),
+                ('GRID', (0,0), (-1,-1), 1, colors.black)
+            ]))
+            elements.append(t)
+            elements.append(Spacer(1, 0.2 * inch))
+
+            # Figures
             for b in png_bytes_list:
                 try:
                     bio = BytesIO(b)
-                    rl_img = RLImage(bio, width=6.5 * inch)
+                    rl_img = RLImage(bio, width=6.5*inch)
                     elements.append(rl_img)
-                    elements.append(Spacer(1, 0.2 * inch))
+                    elements.append(Spacer(1,0.2*inch))
                 except Exception:
-                    # skip broken images
                     continue
-            try:
-                buf = BytesIO()
-                doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=18)
-                doc.build(elements)
-                buf.seek(0)
-                return buf.read()
-            except Exception:
-                return None
 
-        pdf_bytes = _build_pdf_bytes("Physical Availability Report", kpi_text, figs_bytes)
+            buf = BytesIO()
+            doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=18)
+            doc.build(elements)
+            buf.seek(0)
+            return buf.read()
+
+        pdf_bytes = _build_pdf_bytes("Physical Availability Report", kpi_table_data, figs_bytes)
         if pdf_bytes:
             st.session_state['_last_pdf'] = pdf_bytes
             st.sidebar.success("PDF generated and ready to download.")
         else:
-            st.sidebar.error("Failed to generate PDF. Check server logs and installed dependencies.")
+            st.sidebar.error("Failed to generate PDF. Check logs.")
+
+    # -----------------------------
+    # 5. Download button
+    # -----------------------------
     if st.session_state.get('_last_pdf') is not None:
-        st.sidebar.download_button("Download latest PDF", data=st.session_state['_last_pdf'], file_name="PA_report.pdf", mime="application/pdf")
-else:
-    st.sidebar.info("PDF export unavailable: ReportLab not installed in this environment.")
+        st.sidebar.download_button(
+            "Download latest PDF",
+            data=st.session_state['_last_pdf'],
+            file_name="PA_report.pdf",
+            mime="application/pdf"
+        )
+
 
 # Granularity control (sidebar)
 granularity = st.sidebar.selectbox("Time granularity", options=["WEEK", "PERIOD_MONTH"], index=1)

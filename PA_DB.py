@@ -611,11 +611,14 @@ MTTR_GLOBAL_HOURS_ROUNDED = round(MTTR_GLOBAL_HOURS, 2) if (MTTR_GLOBAL_HOURS is
 st.sidebar.markdown("---")
 st.sidebar.subheader("Export report (PDF)")
 
+# Ensure defaults exist to prevent NameError
+if "selected_month" not in st.session_state:
+    st.session_state["selected_month"] = "All"
+if "selected_years" not in st.session_state:
+    st.session_state["selected_years"] = []
+
 if REPORTLAB_AVAILABLE:
     if st.sidebar.button("Generate PDF"):
-
-        from io import BytesIO
-        import plotly.express as px
 
         # -----------------------------
         # 1. Fetch current selections safely
@@ -664,6 +667,7 @@ if REPORTLAB_AVAILABLE:
         # 5. Rebuild charts based on filtered data
         # -----------------------------
         def rebuild_figures_for_pdf(filtered_pdf):
+            import plotly.express as px
             figs = []
 
             # Trend chart
@@ -676,17 +680,23 @@ if REPORTLAB_AVAILABLE:
             if "CATEGORY" in filtered_pdf.columns and "DELAY" in filtered_pdf.columns:
                 df_pareto = filtered_pdf.groupby("CATEGORY")["DELAY"].sum().reset_index()
                 df_pareto = df_pareto.sort_values("DELAY", ascending=False)
-                df_pareto["cum_percent"] = df_pareto["DELAY"].cumsum()/df_pareto["DELAY"].sum()*100
+                df_pareto["cum_percent"] = df_pareto["DELAY"].cumsum() / df_pareto["DELAY"].sum() * 100
                 fig_pareto = px.bar(df_pareto, x="CATEGORY", y="DELAY", title="Pareto Chart")
                 figs.append(fig_pareto)
 
-            # TODO: Add other charts (MTTR, MTBF) similarly if needed
+            # MTTR / MTBF weekly & monthly charts (if exist)
+            for col in ["MTTR_W", "MTTR_M", "MTBF_W", "MTBF_M"]:
+                if col in filtered_pdf.columns:
+                    df_tmp = filtered_pdf.groupby("PERIOD_MONTH")[col].mean().reset_index()
+                    fig_tmp = px.line(df_tmp, x="PERIOD_MONTH", y=col, title=col)
+                    figs.append(fig_tmp)
 
             return figs
 
         figs = rebuild_figures_for_pdf(filtered_pdf)
 
-        # Convert figures to PNG bytes for PDF
+        # Convert Plotly figures to PNG bytes
+        from io import BytesIO
         figs_bytes = []
         for fig in figs:
             buf = BytesIO()
@@ -756,7 +766,6 @@ if REPORTLAB_AVAILABLE:
             file_name="PA_report.pdf",
             mime="application/pdf"
         )
-
 
 # -------------------------
 # Tabs: Main Dashboard and Reliability (moved near top as requested)

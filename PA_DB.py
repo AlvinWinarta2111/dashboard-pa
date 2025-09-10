@@ -605,30 +605,28 @@ MTTR_GLOBAL_HOURS = _mtbf_mttr_res.get("MTTR_hours_overall") if isinstance(_mtbf
 MTBF_GLOBAL_HOURS_ROUNDED = round(MTBF_GLOBAL_HOURS, 2) if (MTBF_GLOBAL_HOURS is not None) else None
 MTTR_GLOBAL_HOURS_ROUNDED = round(MTTR_GLOBAL_HOURS, 2) if (MTTR_GLOBAL_HOURS is not None) else None
 
-# PDF Export UI (button) - we'll create the PDF bytes only when the user clicks
+# -----------------------------
+# PDF Export UI (button) - rebuild charts on demand
+# -----------------------------
 st.sidebar.markdown("---")
 st.sidebar.subheader("Export report (PDF)")
 
 if REPORTLAB_AVAILABLE:
     if st.sidebar.button("Generate PDF"):
 
+        from io import BytesIO
+        import plotly.express as px
+
         # -----------------------------
         # 1. Recompute filtered data for PDF
         # -----------------------------
         filtered_pdf = df.copy()
-        
-        # Fetch current selections safely
-        selected_month = st.session_state.get("selected_month", "All")  # default to "All" if missing
+        selected_month = st.session_state.get("selected_month", "All")
         selected_years = st.session_state.get("selected_years", [])
-        
         if selected_month != "All" and selected_month != "":
             filtered_pdf = filtered_pdf[filtered_pdf["PERIOD_MONTH"] == selected_month]
-        
-        if selected_years:
-            filtered_pdf = filtered_pdf[filtered_pdf["PERIOD_YEAR"].isin(selected_years)]
-        
-        # Compute key metrics
-        total_delay = filtered_pdf["DELAY"].sum() if "DELAY" in filtered_pdf.columns else 0
+
+        total_delay = filtered_pdf["DELAY"].sum()
         available_time = None
         try:
             if "AVAILABLE_TIME_MONTH" in filtered_pdf.columns and filtered_pdf["AVAILABLE_TIME_MONTH"].notna().any():
@@ -639,7 +637,7 @@ if REPORTLAB_AVAILABLE:
             available_time = None
 
         PA = max(0, 1 - total_delay / available_time) if (available_time and available_time > 0) else None
-        maintenance_delay = filtered_pdf[filtered_pdf.get("CATEGORY") == "Maintenance"]["DELAY"].sum() if "CATEGORY" in filtered_pdf.columns else 0
+        maintenance_delay = filtered_pdf[filtered_pdf["CATEGORY"] == "Maintenance"]["DELAY"].sum() if "CATEGORY" in filtered_pdf.columns else 0
         MA = max(0, 1 - maintenance_delay / available_time) if (available_time and available_time > 0) else None
 
         # -----------------------------
@@ -654,21 +652,59 @@ if REPORTLAB_AVAILABLE:
         ]
 
         # -----------------------------
-        # 3. Ensure figures exist in session_state or rebuild them
+        # 3. Build charts on-the-fly
         # -----------------------------
         figs_bytes = []
-        chart_keys = ['pdf_fig_trend','pdf_fig_pareto','pdf_fig_mttr_w','pdf_fig_mttr_m','pdf_fig_mtbf_w','pdf_fig_mtbf_m']
 
-        for key in chart_keys:
-            fig = st.session_state.get(key)
-            if fig is None:
-                # Optionally rebuild chart here if needed
-                continue
-            # Convert Plotly figure to PNG bytes
+        try:
+            # Trend figure
+            fig_trend = px.line(filtered_pdf, x="PERIOD_MONTH", y="DELAY", title="Delay Trend")
             buf = BytesIO()
-            fig.write_image(buf, format="png", scale=2)
+            fig_trend.write_image(buf, format="png", scale=2)
             buf.seek(0)
             figs_bytes.append(buf.read())
+
+            # Pareto figure
+            pareto_data = filtered_pdf.groupby("CATEGORY")["DELAY"].sum().reset_index().sort_values("DELAY", ascending=False)
+            fig_pareto = px.bar(pareto_data, x="CATEGORY", y="DELAY", title="Delay Pareto")
+            buf = BytesIO()
+            fig_pareto.write_image(buf, format="png", scale=2)
+            buf.seek(0)
+            figs_bytes.append(buf.read())
+
+            # MTTR weekly
+            if "MTTR_W" in filtered_pdf.columns:
+                fig_mttr_w = px.bar(filtered_pdf, x="PERIOD_WEEK", y="MTTR_W", title="MTTR Weekly")
+                buf = BytesIO()
+                fig_mttr_w.write_image(buf, format="png", scale=2)
+                buf.seek(0)
+                figs_bytes.append(buf.read())
+
+            # MTTR monthly
+            if "MTTR_M" in filtered_pdf.columns:
+                fig_mttr_m = px.bar(filtered_pdf, x="PERIOD_MONTH", y="MTTR_M", title="MTTR Monthly")
+                buf = BytesIO()
+                fig_mttr_m.write_image(buf, format="png", scale=2)
+                buf.seek(0)
+                figs_bytes.append(buf.read())
+
+            # MTBF weekly
+            if "MTBF_W" in filtered_pdf.columns:
+                fig_mtbf_w = px.bar(filtered_pdf, x="PERIOD_WEEK", y="MTBF_W", title="MTBF Weekly")
+                buf = BytesIO()
+                fig_mtbf_w.write_image(buf, format="png", scale=2)
+                buf.seek(0)
+                figs_bytes.append(buf.read())
+
+            # MTBF monthly
+            if "MTBF_M" in filtered_pdf.columns:
+                fig_mtbf_m = px.bar(filtered_pdf, x="PERIOD_MONTH", y="MTBF_M", title="MTBF Monthly")
+                buf = BytesIO()
+                fig_mtbf_m.write_image(buf, format="png", scale=2)
+                buf.seek(0)
+                figs_bytes.append(buf.read())
+        except Exception as e:
+            st.sidebar.error(f"Failed to build charts for PDF: {e}")
 
         # -----------------------------
         # 4. Build PDF
@@ -679,7 +715,6 @@ if REPORTLAB_AVAILABLE:
             from reportlab.lib.styles import getSampleStyleSheet
             from reportlab.lib import colors
             from reportlab.lib.units import inch
-            from io import BytesIO
 
             elements = []
             styles = getSampleStyleSheet()
@@ -734,70 +769,6 @@ if REPORTLAB_AVAILABLE:
             file_name="PA_report.pdf",
             mime="application/pdf"
         )
-
-
-# Granularity control (sidebar)
-granularity = st.sidebar.selectbox("Time granularity", options=["WEEK", "PERIOD_MONTH"], index=1)
-
-# Build month list (chronologically)
-months_available = []
-if "PERIOD_MONTH" in df.columns:
-    unique_pm = pd.Series(df["PERIOD_MONTH"].dropna().astype(str).str.strip().unique())
-    parsed = pd.to_datetime(unique_pm, format="%b %Y", errors="coerce")
-    if parsed.notna().any():
-        months_df = pd.DataFrame({"PERIOD_MONTH": unique_pm.values, "period_dt": parsed.values})
-        months_df = months_df.sort_values("period_dt")
-        months_available = months_df["PERIOD_MONTH"].tolist()
-if not months_available and "MONTH" in df.columns and "YEAR" in df.columns:
-    month_to_idx = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,"JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
-    tmp = []
-    for _, r in df.iterrows():
-        m = str(r.get("MONTH","")).strip()
-        if m=="":
-            continue
-        y = r.get("YEAR")
-        if pd.isna(y):
-            continue
-        try:
-            y_int = int(y)
-        except Exception:
-            continue
-        m_upper = m.upper()
-        if m_upper not in month_to_idx:
-            continue
-        tmp.append((y_int, month_to_idx[m_upper], f"{m_upper} {y_int}"))
-    tmp_sorted = sorted(set(tmp), key=lambda x:(x[0],x[1]))
-    months_available = [t[2] for t in tmp_sorted]
-
-if months_available:
-    try:
-        default_idx = len(months_available)-1
-    except Exception:
-        default_idx = 0
-else:
-    default_idx = 0
-months = ["All"] + months_available
-selected_month = st.sidebar.selectbox("MONTH", months, index=0)
-
-# Year filter multi-select (global)
-all_years = []
-if "YEAR" in df.columns:
-    try:
-        yrs = pd.Series(df["YEAR"].dropna().astype(int).unique()).sort_values(ascending=False)
-        all_years = yrs.tolist()
-    except Exception:
-        all_years = []
-if all_years:
-    # DESCENDING default selection (user requested)
-    selected_years = st.sidebar.multiselect(
-        "Year (multi-select, descending)",
-        options=all_years,
-        default=all_years,
-        format_func=str  # safer, converts everything to string for display
-    )
-
-else:
-    selected_years = []
 
 # -------------------------
 # Tabs: Main Dashboard and Reliability (moved near top as requested)

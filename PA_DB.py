@@ -614,6 +614,9 @@ st.sidebar.subheader("Export report (PDF)")
 if REPORTLAB_AVAILABLE:
     if st.sidebar.button("Generate PDF"):
 
+        from io import BytesIO
+        import plotly.express as px
+
         # -----------------------------
         # 1. Fetch current selections safely
         # -----------------------------
@@ -632,7 +635,7 @@ if REPORTLAB_AVAILABLE:
         # -----------------------------
         # 3. Compute KPI values
         # -----------------------------
-        total_delay = filtered_pdf["DELAY"].sum()
+        total_delay = filtered_pdf["DELAY"].sum() if "DELAY" in filtered_pdf.columns else 0
         available_time = None
         try:
             if "AVAILABLE_TIME_MONTH" in filtered_pdf.columns and filtered_pdf["AVAILABLE_TIME_MONTH"].notna().any():
@@ -661,7 +664,6 @@ if REPORTLAB_AVAILABLE:
         # 5. Rebuild charts based on filtered data
         # -----------------------------
         def rebuild_figures_for_pdf(filtered_pdf):
-            import plotly.express as px
             figs = []
 
             # Trend chart
@@ -678,13 +680,14 @@ if REPORTLAB_AVAILABLE:
                 fig_pareto = px.bar(df_pareto, x="CATEGORY", y="DELAY", title="Pareto Chart")
                 figs.append(fig_pareto)
 
-            # Add other charts (MTTR, MTBF) if needed using similar pattern
+            # TODO: Add other charts (MTTR, MTBF) similarly if needed
 
             return figs
 
         figs = rebuild_figures_for_pdf(filtered_pdf)
+
+        # Convert figures to PNG bytes for PDF
         figs_bytes = []
-        from io import BytesIO
         for fig in figs:
             buf = BytesIO()
             fig.write_image(buf, format="png", scale=2)

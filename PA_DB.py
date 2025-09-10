@@ -605,11 +605,6 @@ MTTR_GLOBAL_HOURS = _mtbf_mttr_res.get("MTTR_hours_overall") if isinstance(_mtbf
 MTBF_GLOBAL_HOURS_ROUNDED = round(MTBF_GLOBAL_HOURS, 2) if (MTBF_GLOBAL_HOURS is not None) else None
 MTTR_GLOBAL_HOURS_ROUNDED = round(MTTR_GLOBAL_HOURS, 2) if (MTTR_GLOBAL_HOURS is not None) else None
 
-# -------------------------
-# Sidebar Filters & PDF Export UI
-# -------------------------
-st.sidebar.header("Filters & Options")
-
 # PDF Export UI (button) - we'll create the PDF bytes only when the user clicks
 st.sidebar.markdown("---")
 st.sidebar.subheader("Export report (PDF)")
@@ -621,12 +616,19 @@ if REPORTLAB_AVAILABLE:
         # 1. Recompute filtered data for PDF
         # -----------------------------
         filtered_pdf = df.copy()
+        
+        # Fetch current selections safely
+        selected_month = st.session_state.get("selected_month", "All")  # default to "All" if missing
+        selected_years = st.session_state.get("selected_years", [])
+        
         if selected_month != "All" and selected_month != "":
             filtered_pdf = filtered_pdf[filtered_pdf["PERIOD_MONTH"] == selected_month]
-        if selected_years and "YEAR" in filtered_pdf.columns:
-            filtered_pdf = filtered_pdf[filtered_pdf["YEAR"].isin(selected_years)]
-
-        total_delay = filtered_pdf["DELAY"].sum()
+        
+        if selected_years:
+            filtered_pdf = filtered_pdf[filtered_pdf["PERIOD_YEAR"].isin(selected_years)]
+        
+        # Compute key metrics
+        total_delay = filtered_pdf["DELAY"].sum() if "DELAY" in filtered_pdf.columns else 0
         available_time = None
         try:
             if "AVAILABLE_TIME_MONTH" in filtered_pdf.columns and filtered_pdf["AVAILABLE_TIME_MONTH"].notna().any():
@@ -637,7 +639,7 @@ if REPORTLAB_AVAILABLE:
             available_time = None
 
         PA = max(0, 1 - total_delay / available_time) if (available_time and available_time > 0) else None
-        maintenance_delay = filtered_pdf[filtered_pdf["CATEGORY"] == "Maintenance"]["DELAY"].sum() if "CATEGORY" in filtered_pdf.columns else 0
+        maintenance_delay = filtered_pdf[filtered_pdf.get("CATEGORY") == "Maintenance"]["DELAY"].sum() if "CATEGORY" in filtered_pdf.columns else 0
         MA = max(0, 1 - maintenance_delay / available_time) if (available_time and available_time > 0) else None
 
         # -----------------------------
@@ -676,6 +678,8 @@ if REPORTLAB_AVAILABLE:
             from reportlab.lib.pagesizes import A4
             from reportlab.lib.styles import getSampleStyleSheet
             from reportlab.lib import colors
+            from reportlab.lib.units import inch
+            from io import BytesIO
 
             elements = []
             styles = getSampleStyleSheet()

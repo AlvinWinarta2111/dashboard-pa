@@ -745,7 +745,13 @@ if "YEAR" in df.columns:
         all_years = []
 if all_years:
     # DESCENDING default selection (user requested)
-    selected_years = st.sidebar.multiselect("Year (multi-select, descending)", options=all_years, default=all_years, format_func=lambda x: int(x))
+selected_years = st.sidebar.multiselect(
+    "Year (multi-select, descending)",
+    options=all_years,
+    default=all_years,
+    format_func=str  # safer, converts everything to string for display
+)
+
 else:
     selected_years = []
 

@@ -6,4 +6,3 @@ streamlit-aggrid
 kaleido
 reportlab
 Pillow
-plotly-get-chrome

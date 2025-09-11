@@ -175,47 +175,60 @@ def _mpl_png_bar_from_df(df, x_col, y_col, title="", color="blue", xlabel="", yl
         return None
 
 # -------------------------
-# Helper: create PDF bytes from title, kpi text, and list of PNG bytes
+# Helper: create PDF bytes from title, KPI table, and list of PNG bytes
 # -------------------------
-def _create_pdf_bytes(title, kpi_text, png_byte_list):
-    """
-    Build a simple PDF using ReportLab with the provided PNG byte sequences.
-    png_byte_list: list of PNG bytes (not Plotly figure objects).
-    """
+def _create_pdf_bytes(title, PA, MA, total_delay, available_time, png_byte_list):
     if not REPORTLAB_AVAILABLE:
         return None
 
-    elements = []
+    elements = []  # must exist before appending anything
     styles = getSampleStyleSheet() if getSampleStyleSheet else None
-    if styles:
-        title_style = styles.get("Heading1")
-        normal_style = styles.get("Normal")
-    else:
-        title_style = None
-        normal_style = None
+    title_style = styles.get("Heading1") if styles else None
 
+    # Title
     if title_style:
         elements.append(Paragraph(title, title_style))
-    if normal_style and kpi_text:
-        elements.append(Spacer(1, 0.1 * inch))
-        elements.append(Paragraph(kpi_text.replace("\n", "<br/>"), normal_style))
-    elements.append(Spacer(1, 0.2 * inch))
+        elements.append(Spacer(1, 0.2 * inch))
 
+    # KPI table
+    data = [
+        ["Metric", "Value"],
+        ["Physical Availability (PA)", f"{PA:.2%}" if PA is not None else "N/A"],
+        ["Mechanical Availability (MA)", f"{MA:.2%}" if MA is not None else "N/A"],
+        ["Total Delay (hrs)", f"{total_delay:.2f}" if total_delay is not None else "N/A"],
+        ["Available Time (hrs)", f"{available_time:.2f}" if available_time is not None else "N/A"],
+    ]
+    table = Table(data, colWidths=[200, 200])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
+        ("GRID", (0, 0), (-1, -1), 1, colors.black),
+    ]))
+    elements.append(table)
+    elements.append(Spacer(1, 0.3 * inch))
+
+    # Charts
     for png in png_byte_list or []:
         if not png:
             continue
         try:
             bio = BytesIO(png)
-            rl_img = RLImage(bio, width=6.5 * inch)
+            rl_img = RLImage(bio, width=5.5 * inch)  # ← adjust size here
             elements.append(rl_img)
-            elements.append(Spacer(1, 0.15 * inch))
+            elements.append(Spacer(1, 0.2 * inch))
         except Exception:
-            # skip if this image can't be embedded
             continue
 
+    # Build PDF
     try:
         buffer = BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=18)
+        doc = SimpleDocTemplate(
+            buffer, pagesize=A4,
+            rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=18
+        )
         doc.build(elements)
         buffer.seek(0)
         return buffer.read()

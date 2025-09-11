@@ -865,7 +865,7 @@ if REPORTLAB_AVAILABLE:
                         pass
 
         # 2) Last-resort: if some PNGs missing but figure variables exist in globals()
-        # Try known fig variable names produced by the app (safe no-op if they don't exist)
+        # Try known fig variable names produced by the app (safe no-op if they's don't exist)
         known_fig_names = [
             "fig_trend",
             "fig_pareto",
@@ -918,7 +918,7 @@ else:
     st.sidebar.info("PDF export unavailable: ReportLab not installed in this environment.")
 
 # -------------------------
-# Time granularity / Month / Year filters
+# Time granularity / Month / Year filters (moved here)
 # -------------------------
 granularity = st.sidebar.selectbox("Time granularity", options=["WEEK", "PERIOD_MONTH"], index=1)
 
@@ -982,7 +982,7 @@ else:
 
 # -------------------------
 # Apply selected filters to df (month & years)
-# NOTE: This section is moved to the top-level scope to ensure 'filtered' is always defined.
+# NOTE: This section is moved to a global scope to ensure 'filtered' is always defined.
 # -------------------------
 filtered = df.copy()
 if selected_month != "All" and selected_month != "":
@@ -1551,7 +1551,7 @@ with tabs[1]:
                 fig_mtbf_m.update_layout(xaxis_title="Month", yaxis_title="MTBF (hours)", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02), margin=dict(t=60))
                 png = _fig_to_png_bytes(fig_mtbf_m)
                 if not png:
-                    png = _mpl_png_bar_from_df(monthly_df_local, x_col="PERIOD_MONTH", y_col="MTBF_hours", title="MTBF — Monthly", color="orange", xlabel="Month", ylabel="MTBF (hrs)")
+                    png = _mpl_png_bar_from_df(monthly_df_local, x_col="PERIOD_MONTH", y_col="MTBF_hours", title="MTBF — Monthly", color="orange", xlabel="Month", ylabel="MTTR (hrs)")
                 if png:
                     st.session_state['pdf_fig_mtbf_m'] = png
                 st.plotly_chart(fig_mtbf_m, use_container_width=True)

@@ -750,6 +750,11 @@ MTBF_TOTAL_MAINT_DELAY = _mtbf_mttr_res.get("total_maintenance_delay") if isinst
 # -------------------------
 # Sidebar Filters & PDF export UI (unchanged placement)
 # -------------------------
+total_delay = filtered["DELAY"].sum()
+PA = max(0, 1 - total_delay / available_time) if (available_time and available_time > 0) else None
+maintenance_delay = filtered[filtered["CATEGORY"] == "Maintenance"]["DELAY"].sum() if "CATEGORY" in filtered.columns else 0
+MA = max(0, 1 - maintenance_delay / available_time) if (available_time and available_time > 0) else None
+
 st.sidebar.header("Filters & Options")
 st.sidebar.markdown("---")
 st.sidebar.subheader("Export report (PDF)")
@@ -864,8 +869,6 @@ if selected_years:
 # -------------------------
 # KPI calculations (unchanged)
 # -------------------------
-total_delay = filtered["DELAY"].sum()
-
 available_time = None
 try:
     if "AVAILABLE_TIME_MONTH" in filtered.columns and filtered["AVAILABLE_TIME_MONTH"].notna().any():
@@ -876,11 +879,7 @@ try:
         available_time = None
 except Exception:
     available_time = None
-
-PA = max(0, 1 - total_delay / available_time) if (available_time and available_time > 0) else None
-maintenance_delay = filtered[filtered["CATEGORY"] == "Maintenance"]["DELAY"].sum() if "CATEGORY" in filtered.columns else 0
-MA = max(0, 1 - maintenance_delay / available_time) if (available_time and available_time > 0) else None
-
+    
 pa_target = filtered["PA_TARGET"].dropna().unique().tolist() if "PA_TARGET" in filtered.columns else []
 ma_target = filtered["MA_TARGET"].dropna().unique().tolist() if "MA_TARGET" in filtered.columns else []
 pa_target = pa_target[0] if pa_target else 0.9

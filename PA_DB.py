@@ -41,8 +41,7 @@ except Exception:
 # -------------------------
 def _fig_to_png_bytes(fig):
     """
-    Try to convert a Plotly figure to PNG bytes using fig.to_image.
-    If it fails, return None. This function is no longer used for Kaleido.
+    Try to convert a Plotly figure to PNG bytes. This function is no longer dependent on kaleido.
     It's kept for any other potential Plotly image export.
     """
     try:
@@ -1076,21 +1075,8 @@ with tabs[0]:
                 donut_data["DELAY"] = donut_data["DELAY"].round(2)
                 donut_fig = go.Figure(data=[go.Pie(labels=donut_data["CATEGORY"], values=donut_data["DELAY"], hole=0.4, textinfo="label+percent", hovertemplate="%{label}: %{value:.2f} hrs<extra></extra>")])
                 donut_fig.update_layout(margin=dict(t=20,b=20,l=20,r=20))
-                # Try to cache PNG (Plotly -> PNG), fallback to Matplotlib Pareto (we'll feed a small pareto-like DF)
-                png = _fig_to_png_bytes(donut_fig)
-                if not png:
-                    # create a simple pareto-like image via Matplotlib as fallback
-                    try:
-                        small_df = donut_data.rename(columns={"CATEGORY":"label","DELAY":"hours"}).copy()
-                        small_df["cum_hours"] = small_df["hours"].cumsum()
-                        total_sum = small_df["hours"].sum()
-                        small_df["cum_pct"] = (small_df["cum_hours"] / total_sum) if total_sum > 0 else 0
-                        # reuse pareto fallback function (labels -> equipment key)
-                        png = _mpl_png_pareto_from_df(small_df.rename(columns={"label":"EQUIPMENT_DESC","hours":"hours","cum_pct":"cum_pct"}), equipment_key="EQUIPMENT_DESC", title="Delay by Category (fallback)")
-                    except Exception:
-                        png = None
-                if png:
-                    st.session_state['pdf_fig_pareto'] = png
+                # Store the Plotly figure in session state for potential PDF rendering
+                st.session_state['pdf_fig_donut1'] = donut_fig
                 st.plotly_chart(donut_fig, use_container_width=True)
             else:
                 st.info("No delay data available.")
@@ -1107,6 +1093,7 @@ with tabs[0]:
                     sched_donut["DELAY"] = sched_donut["DELAY"].round(2)
                     donut_fig2 = go.Figure(data=[go.Pie(labels=sched_donut["SUB_CATEGORY"], values=sched_donut["DELAY"], hole=0.4, textinfo="label+percent", hovertemplate="%{label}: %{value:.2f} hrs<extra></extra>")])
                     donut_fig2.update_layout(margin=dict(t=20,b=20,l=20,r=20))
+                    st.session_state['pdf_fig_donut2'] = donut_fig2
                     st.plotly_chart(donut_fig2, use_container_width=True)
                 else:
                     st.info("No maintenance breakdown available.")

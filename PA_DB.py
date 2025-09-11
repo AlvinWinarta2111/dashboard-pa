@@ -40,16 +40,6 @@ except Exception:
 # Helper: convert Plotly figure to PNG bytes (try kaleido first)
 # -------------------------
 def _fig_to_png_bytes(fig):
-    """
-    Try to convert a Plotly figure to PNG bytes using fig.to_image.
-    If it fails (kaleido/Chrome issues), return None so we can fallback to Matplotlib.
-    """
-    try:
-        # primary attempt (kaleido engine)
-        img_bytes = fig.to_image(format="png", engine="kaleido")
-        if isinstance(img_bytes, (bytes, bytearray)):
-            return bytes(img_bytes)
-    except Exception:
         # Ignore and try default to_image (may also fail if kaleido is missing)
         try:
             img_bytes = fig.to_image(format="png")
@@ -543,6 +533,55 @@ def load_data_from_url():
         pass
 
     return df
+
+def compute_mtbf_mttr_from_url(url: str):
+    """
+    Load dataset from URL and compute MTBF/MTTR aggregated by WEEK and PERIOD_MONTH.
+
+    Returns
+    -------
+    mtbf_w : pd.DataFrame
+        Weekly MTBF values
+    mtbf_m : pd.DataFrame
+        Monthly MTBF values
+    mttr_w : pd.DataFrame
+        Weekly MTTR values
+    mttr_m : pd.DataFrame
+        Monthly MTTR values
+    """
+    df = load_data_from_url(url).copy()
+
+    # Ensure relevant fields exist
+    for col in ["WEEK", "PERIOD_MONTH", "MTBF", "MTTR"]:
+        if col not in df.columns:
+            df[col] = None
+
+    # Weekly aggregates
+    mtbf_w = (
+        df.groupby("WEEK", dropna=True)["MTBF"].mean().reset_index()
+        if "WEEK" in df.columns
+        else pd.DataFrame(columns=["WEEK", "MTBF"])
+    )
+    mttr_w = (
+        df.groupby("WEEK", dropna=True)["MTTR"].mean().reset_index()
+        if "WEEK" in df.columns
+        else pd.DataFrame(columns=["WEEK", "MTTR"])
+    )
+
+    # Monthly aggregates
+    mtbf_m = (
+        df.groupby("PERIOD_MONTH", dropna=True)["MTBF"].mean().reset_index()
+        if "PERIOD_MONTH" in df.columns
+        else pd.DataFrame(columns=["PERIOD_MONTH", "MTBF"])
+    )
+    mttr_m = (
+        df.groupby("PERIOD_MONTH", dropna=True)["MTTR"].mean().reset_index()
+        if "PERIOD_MONTH" in df.columns
+        else pd.DataFrame(columns=["PERIOD_MONTH", "MTTR"])
+    )
+
+    return mtbf_w, mtbf_m, mttr_w, mttr_m
+
 
 # -------------------------
 # Load data

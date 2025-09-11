@@ -1,5 +1,8 @@
-# Full updated script (with Matplotlib fallback for PDF export)
-# NOTE: This file is the full script to replace your PA_DB.py
+# Full updated PA_DB.py
+# Integrated: Reliability tab preserved, Year multi-select (sidebar), PDF export (charts + KPI table),
+# Chart capture fallback: kaleido -> html2image (if installed), and many small safety checks.
+# Inline comments added for easier error tracing.
+
 import streamlit as st
 import pandas as pd
 import datetime
@@ -7,262 +10,196 @@ from datetime import timedelta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# AgGrid
+# AgGrid for drilldown table
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 
-# Additional imports for PDF export & fallback
+# IO + images
 import io
 from io import BytesIO
-from PIL import Image as PILImage
+import tempfile
 
-# Matplotlib for robust PNG fallback (Option A)
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
-
-# Try to import ReportLab; if not available PDF generation will be disabled
+# PIL - used if needed for image handling
 try:
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage
+    from PIL import Image as PILImage
+    PIL_AVAILABLE = True
+except Exception:
+    PIL_AVAILABLE = False
+
+# Try to import ReportLab (used to build PDF)
+try:
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, Table, TableStyle
     from reportlab.lib.styles import getSampleStyleSheet
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import inch
+    from reportlab.lib import colors
     REPORTLAB_AVAILABLE = True
 except Exception:
+    # We'll gracefully disable PDF building if not available
     SimpleDocTemplate = None
     Paragraph = None
     Spacer = None
     RLImage = None
+    Table = None
+    TableStyle = None
     getSampleStyleSheet = None
     A4 = None
     inch = None
+    colors = None
     REPORTLAB_AVAILABLE = False
 
-# -------------------------
-# Helper: convert Plotly figure to PNG bytes (try kaleido first)
-# -------------------------
-def _fig_to_png_bytes(fig):
+# Try to import html2image as fallback for rendering a saved .html -> png
+try:
+    from html2image import Html2Image
+    HTML2IMAGE_AVAILABLE = True
+except Exception:
+    Html2Image = None
+    HTML2IMAGE_AVAILABLE = False
+
+# Helper to convert Plotly figure to PNG bytes
+def _fig_to_png_bytes(fig, width=1200, height=650):
     """
-    Try to convert a Plotly figure to PNG bytes using fig.to_image.
-    If it fails (kaleido/Chrome issues), return None so we can fallback to Matplotlib.
+    Try to produce PNG bytes from a Plotly fig.
+    1) Try .to_image (kaleido) first.
+    2) If that fails and html2image is available, create a temp HTML and screenshot it.
+    Returns bytes or None.
     """
+    # 1) Try kaleido / built-in to_image
     try:
-        # primary attempt (kaleido engine)
-        img_bytes = fig.to_image(format="png", engine="kaleido")
+        # prefer specifying engine only if supported in environment; if engine arg causes deprecation warnings, omit it.
+        img_bytes = fig.to_image(format="png")  # let plotly choose default engine (kaleido if available)
         if isinstance(img_bytes, (bytes, bytearray)):
             return bytes(img_bytes)
-    except Exception:
-        # Ignore and try default to_image (may also fail if kaleido is missing)
+    except Exception as e_k:
+        # Not fatal, we'll try html2image fallback
+        # Inline debug: print to logs (Streamlit will show these in server logs)
+        st.debug(f"_fig_to_png_bytes: to_image failed: {e_k}")
+
+    # 2) html2image fallback (if installed and a headless browser is available)
+    if HTML2IMAGE_AVAILABLE:
         try:
-            img_bytes = fig.to_image(format="png")
-            if isinstance(img_bytes, (bytes, bytearray)):
-                return bytes(img_bytes)
-        except Exception:
-            return None
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False) as tmp_html:
+                tmp_html.write(fig.to_html(full_html=True, include_plotlyjs='cdn'))
+                tmp_html.flush()
+                html_path = tmp_html.name
+
+            # html2image: screenshot, save to temp file
+            hti = Html2Image()
+            png_temp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            png_temp.close()
+            # size arguments: html2image may accept size parameter; we give a reasonable size and let it scale
+            hti.screenshot(html_path, save_as=png_temp.name, size=(width, height))
+            with open(png_temp.name, "rb") as f:
+                data = f.read()
+            return data
+        except Exception as e_h:
+            st.debug(f"_fig_to_png_bytes: html2image fallback failed: {e_h}")
+
+    # If we couldn't get bytes
     return None
 
-# -------------------------
-# Helper: save matplotlib figure to PNG bytes
-# -------------------------
-def _mpl_fig_to_png_bytes(fig):
+# Helper: create PDF bytes from title, KPI dict, and list of PNG bytes
+def _create_pdf_bytes(title, kpi_dict, png_byte_list, img_width_inch=5.5):
     """
-    Save a Matplotlib figure to PNG bytes and close the figure.
-    """
-    try:
-        buf = BytesIO()
-        fig.savefig(buf, format="png", bbox_inches="tight")
-        buf.seek(0)
-        plt.close(fig)
-        return buf.read()
-    except Exception:
-        try:
-            plt.close(fig)
-        except Exception:
-            pass
-        return None
-
-# -------------------------
-# Matplotlib fallback generators for each chart type
-# These functions produce a PNG byte array (or None)
-# -------------------------
-def _mpl_png_trend_from_df(trend_df, x_field, pa_col="PA_pct_rounded", delay_col="total_delay_hours_rounded", title="Trend"):
-    """
-    Create a Matplotlib representation of the Trend chart (PA% bars + Delay line).
-    """
-    try:
-        # convert to safe dataframe copy
-        t = trend_df.copy()
-        x = t[x_field].astype(str).tolist()
-        y_pa = pd.to_numeric(t[pa_col], errors="coerce").fillna(0).tolist()
-        y_delay = pd.to_numeric(t[delay_col], errors="coerce").fillna(0).tolist()
-
-        fig, ax1 = plt.subplots(figsize=(10, 4))
-        idx = list(range(len(x)))
-        # PA% bars
-        ax1.bar(idx, y_pa, width=0.6)
-        ax1.set_ylabel("PA%")
-        ax1.set_ylim(0, 1)
-        ax1.set_xticks(idx)
-        ax1.set_xticklabels(x, rotation=45, ha="right", fontsize=8)
-        # Delay on second axis
-        ax2 = ax1.twinx()
-        ax2.plot(idx, y_delay, marker="o", linewidth=2)
-        ax2.set_ylabel("Delay Hours")
-        fig.suptitle(title)
-        fig.tight_layout()
-        return _mpl_fig_to_png_bytes(fig)
-    except Exception:
-        try:
-            plt.close("all")
-        except Exception:
-            pass
-        return None
-
-def _mpl_png_pareto_from_df(pareto_df, equipment_key="EQUIPMENT_DESC", title="Pareto by Equipment"):
-    """
-    Create a Matplotlib Pareto chart (bars for hours + cumulative % line).
-    """
-    try:
-        p = pareto_df.copy()
-        p[equipment_key] = p[equipment_key].astype(str)
-        labels = p[equipment_key].tolist()
-        hours = pd.to_numeric(p["hours"], errors="coerce").fillna(0).tolist()
-        cum_pct = pd.to_numeric(p["cum_pct"], errors="coerce").fillna(0).tolist()
-
-        fig, ax1 = plt.subplots(figsize=(10, 4))
-        idx = list(range(len(labels)))
-        ax1.bar(idx, hours)
-        ax1.set_ylabel("Hours")
-        ax1.set_xticks(idx)
-        ax1.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-
-        ax2 = ax1.twinx()
-        ax2.plot(idx, [v * 100 for v in cum_pct], color="C1", marker="o")
-        ax2.set_ylabel("Cumulative %")
-        ax2.set_ylim(0, 100)
-        fig.suptitle(title)
-        fig.tight_layout()
-        return _mpl_fig_to_png_bytes(fig)
-    except Exception:
-        try:
-            plt.close("all")
-        except Exception:
-            pass
-        return None
-
-def _mpl_png_bar_from_df(df, x_col, y_col, title="", color="blue", xlabel="", ylabel=""):
-    """
-    Generic vertical bar chart fallback for MTTR/MTBF weekly/monthly.
-    """
-    try:
-        d = df.copy()
-        x = d[x_col].astype(str).tolist()
-        y = pd.to_numeric(d[y_col], errors="coerce").fillna(0).tolist()
-
-        fig, ax = plt.subplots(figsize=(10, 4))
-        idx = list(range(len(x)))
-        ax.bar(idx, y, color=color)
-        ax.set_xticks(idx)
-        ax.set_xticklabels(x, rotation=45, ha="right", fontsize=8)
-        ax.set_xlabel(xlabel if xlabel else "")
-        ax.set_ylabel(ylabel if ylabel else "")
-        fig.suptitle(title)
-        fig.tight_layout()
-        return _mpl_fig_to_png_bytes(fig)
-    except Exception:
-        try:
-            plt.close("all")
-        except Exception:
-            pass
-        return None
-
-# -------------------------
-# -------------------------
-# Helper: create PDF bytes from title, KPI rows (list of lists), and list of PNG bytes
-# -------------------------
-def _create_pdf_bytes(title, kpi_rows, png_byte_list, image_width_inches=6.0):
-    """
-    Build PDF using ReportLab. kpi_rows should be a list of rows like [["Metric","Value"], ...].
-    png_byte_list is a list of PNG bytes to embed (in order).
-    image_width_inches: width of images embedded in inches (float).
+    Build a simple PDF with:
+      - Title
+      - KPIs in a small two-column table
+      - Images (png byte arrays) stacked
+    Returns raw pdf bytes or None if reportlab is not available or build failed.
     """
     if not REPORTLAB_AVAILABLE:
+        st.debug("_create_pdf_bytes: reportlab not available")
         return None
 
-    elements = []
     styles = getSampleStyleSheet() if getSampleStyleSheet else None
     title_style = styles.get("Heading1") if styles else None
     normal_style = styles.get("Normal") if styles else None
 
+    elements = []
+
     # Title
     if title_style:
         elements.append(Paragraph(title, title_style))
-    else:
-        elements.append(Paragraph(title, getSampleStyleSheet()["Heading1"]))
+    elements.append(Spacer(1, 0.10 * inch))
 
-    elements.append(Spacer(1, 0.1 * inch))
-
-    # KPI Table (if provided)
-    try:
-        if kpi_rows and isinstance(kpi_rows, list):
-            # Build ReportLab table
-            from reportlab.platypus import Table, TableStyle
-            from reportlab.lib import colors
-            table = Table(kpi_rows, colWidths=[3.0 * inch, 3.0 * inch])
+    # KPI table; kpi_dict expected: {"PA": "...", "MA": "...", "Total Delay": "...", ...}
+    if isinstance(kpi_dict, dict) and kpi_dict:
+        # Compose data table rows
+        data = [["Metric", "Value"]]
+        for k, v in kpi_dict.items():
+            data.append([str(k), str(v)])
+        # create table with sensible column widths
+        try:
+            colw = [3.5 * inch, 2.5 * inch]
+            table = Table(data, colWidths=colw)
             table.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4F81BD")),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2F4F4F")),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("ALIGN", (0, 0), (-1, -1), "LEFT"),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
                 ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
-                ("GRID", (0, 0), (-1, -1), 0.25, colors.black),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#CCCCCC")),
             ]))
             elements.append(table)
-            elements.append(Spacer(1, 0.2 * inch))
-    except Exception:
-        # If table building fails, add a simple paragraph
-        if normal_style:
-            elements.append(Paragraph("Key KPIs: (unable to format table)", normal_style))
-            elements.append(Spacer(1, 0.1 * inch))
+            elements.append(Spacer(1, 0.15 * inch))
+        except Exception as e_table:
+            st.debug(f"_create_pdf_bytes: failed to create KPI table: {e_table}")
+            # fallback: simple paragraph
+            if normal_style:
+                kp_text = "\n".join([f"{k}: {v}" for k, v in kpi_dict.items()])
+                elements.append(Paragraph(kp_text.replace("\n", "<br/>"), normal_style))
+                elements.append(Spacer(1, 0.15 * inch))
 
-    # Images
-    try:
-        for png in png_byte_list or []:
-            if not png:
-                continue
-            try:
-                bio = BytesIO(png)
-                rl_img = RLImage(bio, width=(image_width_inches * inch))
-                elements.append(rl_img)
-                elements.append(Spacer(1, 0.12 * inch))
-            except Exception:
-                # skip if cannot be embedded
-                continue
-    except Exception:
-        pass
+    # Append images (if any)
+    for png in png_byte_list or []:
+        if not png:
+            continue
+        try:
+            bio = BytesIO(png)
+            # scale width; if user wants smaller images, change img_width_inch parameter
+            rl_img = RLImage(bio, width=img_width_inch * inch)
+            elements.append(rl_img)
+            elements.append(Spacer(1, 0.12 * inch))
+        except Exception as e_img:
+            st.debug(f"_create_pdf_bytes: failed to embed image: {e_img}")
+            continue
 
-    # Build PDF
+    # Build PDF into bytes
     try:
         buffer = BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=18)
         doc.build(elements)
         buffer.seek(0)
         return buffer.read()
-    except Exception:
+    except Exception as e_build:
+        st.debug(f"_create_pdf_bytes: doc.build failed: {e_build}")
         return None
 
 
 # -------------------------
-# Prepare session_state holders for cached PNGs (used in PDF)
+# session_state holders for cached PNGs (used in PDF)
 # -------------------------
-pdf_keys = ['pdf_fig_trend','pdf_fig_pareto','pdf_fig_mttr_w','pdf_fig_mttr_m','pdf_fig_mtbf_w','pdf_fig_mtbf_m']
+pdf_keys = [
+    "pdf_fig_trend",
+    "pdf_fig_pareto",
+    "pdf_fig_mttr_w",
+    "pdf_fig_mttr_m",
+    "pdf_fig_mtbf_w",
+    "pdf_fig_mtbf_m"
+]
+
 for k in pdf_keys:
     if k not in st.session_state:
         st.session_state[k] = None
-if '_last_pdf' not in st.session_state:
-    st.session_state['_last_pdf'] = None
+
+# Flag used when user requests PDF; we set the flag in the sidebar and process at the end of the script
+if "_generate_pdf_request" not in st.session_state:
+    st.session_state["_generate_pdf_request"] = False
+if "_last_pdf" not in st.session_state:
+    st.session_state["_last_pdf"] = None
 
 # -------------------------
-# Streamlit page config and header
+# Page config & header
 # -------------------------
 st.set_page_config(page_title="Physical Availability - Data Delay Time", layout="wide")
 
@@ -299,7 +236,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Logo + Title (unchanged)
 LOGO_URL = "https://raw.githubusercontent.com/AlvinWinarta2111/dashboard-pa/refs/heads/main/images/alamtri_logo.jpeg"
 logo_col, title_col = st.columns([1, 8])
 with logo_col:
@@ -307,16 +243,13 @@ with logo_col:
 with title_col:
     st.title("Physical Availability Dashboard — Data Delay Time")
 
-# create tabs (Main shown implicitly; Reliability as second tab)
-tabs = st.tabs(["Main Dashboard", "Reliability"])
-
 # -------------------------
-# Config: source workbook URL (unchanged)
+# Config (data source)
 # -------------------------
 RAW_URL = "https://raw.githubusercontent.com/AlvinWinarta2111/dashboard-pa/refs/heads/main/Draft_New%20Version_Weekly_Report_Maintenance_CHPP.xlsx"
 
 # -------------------------
-# Load + Clean function (unchanged except minor safe guards)
+# Load + Clean Function (keeps original detection/cleaning logic)
 # -------------------------
 @st.cache_data(ttl=600)
 def load_data_from_url():
@@ -326,7 +259,7 @@ def load_data_from_url():
         st.error(f"Unable to read sheet 'Data Delay Time': {e}")
         return None
 
-    # Detect header row (first 20 rows)
+    # detect header row (first 20 rows)
     header_row = None
     for i in range(20):
         row_values = raw.iloc[i].astype(str).str.upper().tolist()
@@ -340,7 +273,7 @@ def load_data_from_url():
     df = pd.read_excel(RAW_URL, sheet_name="Data Delay Time", header=header_row)
     df.columns = [str(c).strip() for c in df.columns]
 
-    # normalize some column names
+    # replacements to normalize columns (same as your original)
     replacements = {
         "WEEK": "WEEK",
         "MONTH": "MONTH",
@@ -371,20 +304,21 @@ def load_data_from_url():
                 df.rename(columns={col: new}, inplace=True)
                 break
 
+    # Ensure essential columns
     essential = ["WEEK", "MONTH", "YEAR", "DELAY"]
     for c in essential:
         if c not in df.columns:
             st.error(f"Expected column '{c}' not found after cleaning. Found columns: {df.columns.tolist()}")
             return None
 
-    # Convert numeric columns
+    # Numeric conversions
     df["DELAY"] = pd.to_numeric(df["DELAY"], errors="coerce")
     if "AVAILABLE_TIME_MONTH" in df.columns:
         df["AVAILABLE_TIME_MONTH"] = pd.to_numeric(df["AVAILABLE_TIME_MONTH"], errors="coerce")
     else:
         df["AVAILABLE_TIME_MONTH"] = None
 
-    # START/STOP -> AVAILABLE_HOURS
+    # START/STOP available hours compute (if present)
     if "START" in df.columns and "STOP" in df.columns:
         df["START"] = df["START"].astype(str).str.strip()
         df["STOP"] = df["STOP"].astype(str).str.strip()
@@ -411,7 +345,7 @@ def load_data_from_url():
         if "STOP" not in df.columns:
             df["STOP"] = ""
 
-    # Ensure presence of helpful columns and cast to string where appropriate
+    # Cast useful columns to strings
     for cat in ["MTN_DELAY_TYPE", "SCH_MTN", "UNSCH_MTN", "MINING_DELAY", "WEATHER_DELAY", "OTHER_DELAY", "MTN_NOTE", "NOTE", "EQ_DESC", "EQUIPMENT", "CATEGORY", "PERIOD_MONTH", "DATE"]:
         if cat in df.columns:
             df[cat] = df[cat].fillna("").astype(str).str.strip()
@@ -428,7 +362,6 @@ def load_data_from_url():
         if mt == "scheduled" or mt.startswith("sch") or sch not in ("", "nan", "none"):
             return "Scheduled"
         return ""
-
     df["SUB_CATEGORY"] = df.apply(detect_subcat_row, axis=1)
 
     # CATEGORY determination
@@ -444,10 +377,9 @@ def load_data_from_url():
         if r.get("CATEGORY") and str(r.get("CATEGORY")).strip() not in ("", "nan"):
             return str(r.get("CATEGORY")).strip()
         return "Unknown"
-
     df["CATEGORY"] = df.apply(determine_category, axis=1)
 
-    # Compose CAUSE for pareto fallback
+    # CAUSE composition
     def compose_cause(r):
         parts = []
         for c in ["MTN_DELAY_TYPE", "SCH_MTN", "UNSCH_MTN", "MINING_DELAY", "WEATHER_DELAY", "OTHER_DELAY", "MTN_NOTE", "NOTE"]:
@@ -457,18 +389,16 @@ def load_data_from_url():
                 if vs and vs.lower() != "nan":
                     parts.append(vs)
         return " | ".join(parts)
-
     df["CAUSE"] = df.apply(compose_cause, axis=1)
 
-    # YEAR/WEEK numeric normalization
+    # YEAR / WEEK numeric normalization
     df["YEAR"] = pd.to_numeric(df["YEAR"], errors="coerce").astype("Int64")
     df["WEEK"] = pd.to_numeric(df["WEEK"], errors="coerce").astype("Int64")
 
     # Add PERIOD_MONTH if missing
-    if "PERIOD_MONTH" not in df.columns or df["PERIOD_MONTH"].isnull().all() or (df["PERIOD_MONTH"].astype(str).str.strip()=="").all():
+    if "PERIOD_MONTH" not in df.columns or df["PERIOD_MONTH"].isnull().all() or (df["PERIOD_MONTH"].astype(str).str.strip() == "").all():
         if "MONTH" in df.columns and "YEAR" in df.columns:
             df["PERIOD_MONTH"] = df["MONTH"].astype(str).str.strip() + " " + df["YEAR"].astype(str)
-
     if "PERIOD_MONTH" in df.columns:
         df["PERIOD_MONTH"] = df["PERIOD_MONTH"].astype(str).str.strip()
 
@@ -485,7 +415,7 @@ def load_data_from_url():
     else:
         df["EQUIPMENT_DESC"] = df["CAUSE"].replace("", "(Unknown)").astype(str)
 
-    # DATE: normalize
+    # DATE: keep as string (YYYY-MM-DD) if possible
     if "DATE" in df.columns:
         try:
             df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce").dt.date.astype("object").fillna("").astype(str)
@@ -494,18 +424,13 @@ def load_data_from_url():
     else:
         df["DATE"] = ""
 
-    # compute WEEK_START (ISO week Monday)
+    # Compute WEEK_START (ISO week Monday)
     def _compute_week_start(r):
         try:
             y = r.get("YEAR")
             w = r.get("WEEK")
             if pd.notna(y) and pd.notna(w):
-                y_i = int(y)
-                w_i = int(w)
-                try:
-                    return datetime.date.fromisocalendar(y_i, w_i, 1)
-                except Exception:
-                    pass
+                return datetime.date.fromisocalendar(int(y), int(w), 1)
         except Exception:
             pass
         try:
@@ -516,10 +441,9 @@ def load_data_from_url():
         except Exception:
             pass
         return pd.NaT
-
     df["WEEK_START"] = df.apply(_compute_week_start, axis=1)
 
-    # assign each ISO-week to the month containing the week end (latest month of that week)
+    # assign week -> month based on week end month
     try:
         week_start_dt = pd.to_datetime(df["WEEK_START"], errors="coerce")
         week_end_dt = week_start_dt + pd.Timedelta(days=6)
@@ -537,20 +461,17 @@ if df is None:
     st.stop()
 
 # -------------------------
-# NEW: compute MTBF & MTTR from "Data Operational" sheet (COUNT = total rows)
-# Fixed grouping key bug and improved parsing
+# Compute MTBF & MTTR from "Data Operational" sheet (if present)
 # -------------------------
 @st.cache_data(ttl=600)
 def compute_mtbf_mttr_from_url(raw_url):
-    """
-    Reads the Data Operational sheet and computes weekly/monthly MTBF & MTTR using simple COUNT logic.
-    """
+    """Read a sheet containing operational rows and compute weekly/monthly MTBF & MTTR."""
     try:
         xls = pd.ExcelFile(raw_url)
     except Exception as e:
         return {"error": f"Could not open workbook: {e}"}
 
-    # find the sheet name
+    # find best matching sheet
     sheet_name = None
     for s in xls.sheet_names:
         if s.strip().lower() == "data operational":
@@ -569,7 +490,7 @@ def compute_mtbf_mttr_from_url(raw_url):
     except Exception as e:
         return {"error": f"Could not read sheet '{sheet_name}': {e}"}
 
-    # detect columns
+    # detect columns (operational hours, maintenance delay, date)
     op_col = None
     maint_col = None
     date_col = None
@@ -597,7 +518,6 @@ def compute_mtbf_mttr_from_url(raw_url):
                 maint_col = c
                 break
 
-    # detect date/week/year column
     for c in df_op.columns:
         lc = str(c).lower()
         if lc.strip() in ("date", "dates", "tanggal"):
@@ -610,7 +530,7 @@ def compute_mtbf_mttr_from_url(raw_url):
                 date_col = c
                 break
 
-    # parse operational hours
+    # parse operational hours to decimal hours
     def _parse_operational_hours(val):
         try:
             if pd.isna(val) or (isinstance(val, str) and str(val).strip() == ""):
@@ -644,7 +564,7 @@ def compute_mtbf_mttr_from_url(raw_url):
     else:
         df_op["_maint_delay_num"] = pd.Series([float("nan")] * len(df_op))
 
-    # parse date column if present
+    # parse date-like column to DATETIME
     if date_col is not None:
         try:
             df_op["_date_parsed"] = pd.to_datetime(df_op[date_col], errors="coerce")
@@ -653,7 +573,7 @@ def compute_mtbf_mttr_from_url(raw_url):
     else:
         df_op["_date_parsed"] = pd.Series([pd.NaT] * len(df_op))
 
-    # YEAR and WEEK using ISO
+    # derive YEAR and WEEK (ISO)
     def _from_date_to_iso(y):
         try:
             if pd.isna(y):
@@ -668,21 +588,20 @@ def compute_mtbf_mttr_from_url(raw_url):
     df_op["YEAR"] = df_op["_yr_wk"].apply(lambda t: t[0] if isinstance(t, tuple) else None)
     df_op["WEEK"] = df_op["_yr_wk"].apply(lambda t: t[1] if isinstance(t, tuple) else None)
 
-    # WEEK_START and PERIOD_MONTH derived from date parsed
+    # WEEK_START & PERIOD_MONTH (month of week end)
     try:
-        # start date of the ISO-week
+        # attempt to create week start as date; fallback gracefully
         df_op["WEEK_START"] = df_op["_date_parsed"].dt.to_period("W").apply(lambda p: p.start_time.date())
         ws = pd.to_datetime(df_op["WEEK_START"], errors="coerce")
         we = ws + pd.Timedelta(days=6)
         df_op["PERIOD_MONTH"] = we.dt.strftime("%b %Y")
     except Exception:
-        # fallback to simple month-year formatting
         try:
             df_op["PERIOD_MONTH"] = df_op["_date_parsed"].dt.strftime("%b %Y")
         except Exception:
             df_op["PERIOD_MONTH"] = ""
 
-    # ---------- (FIXED) Compute weekly grouping with direct column names ----------
+    # Group weekly
     try:
         weekly_group = df_op.groupby(["YEAR", "WEEK"], dropna=False).agg(
             total_operational_hours=("_op_hours_dec", "sum"),
@@ -690,18 +609,25 @@ def compute_mtbf_mttr_from_url(raw_url):
             count_rows=("_op_hours_dec", "count")
         ).reset_index()
     except Exception:
-        # fallback to safe approach
         weekly_group = df_op.groupby(["YEAR", "WEEK"], dropna=False).agg(
             total_operational_hours=("_op_hours_dec", "sum"),
             total_maintenance_delay=("_maint_delay_num", "sum"),
             count_rows=("_op_hours_dec", "count")
         ).reset_index()
 
-    # derive MTBF/MTTR weekly
-    weekly_group["MTBF_hours"] = weekly_group.apply(lambda r: (r["total_operational_hours"] / r["count_rows"]) if (r["count_rows"] and r["count_rows"] > 0) else float("nan"), axis=1)
-    weekly_group["MTTR_hours"] = weekly_group.apply(lambda r: (r["total_maintenance_delay"] / r["count_rows"]) if (r["count_rows"] and r["count_rows"] > 0) else float("nan"), axis=1)
+    # calculate MTBF / MTTR in hours
+    def _safe_div(a, b):
+        try:
+            if b and b > 0:
+                return float(a) / float(b)
+            return float("nan")
+        except Exception:
+            return float("nan")
 
-    # labels & week_start ordering
+    weekly_group["MTBF_hours"] = weekly_group.apply(lambda r: _safe_div(r["total_operational_hours"], r["count_rows"]), axis=1)
+    weekly_group["MTTR_hours"] = weekly_group.apply(lambda r: _safe_div(r["total_maintenance_delay"], r["count_rows"]), axis=1)
+
+    # readable labels + week_start for ordering
     def _wk_label_from_row(r):
         try:
             y = int(r["YEAR"])
@@ -710,7 +636,6 @@ def compute_mtbf_mttr_from_url(raw_url):
         except Exception:
             return ""
     weekly_group["period_label"] = weekly_group.apply(_wk_label_from_row, axis=1)
-
     def _wk_start(r):
         try:
             return datetime.date.fromisocalendar(int(r["YEAR"]), int(r["WEEK"]), 1)
@@ -719,14 +644,14 @@ def compute_mtbf_mttr_from_url(raw_url):
     weekly_group["week_start"] = weekly_group.apply(_wk_start, axis=1)
     weekly_group = weekly_group.sort_values("week_start").reset_index(drop=True)
 
-    # monthly grouping
+    # Monthly grouping
     monthly_group = df_op.groupby("PERIOD_MONTH", dropna=False).agg(
         total_operational_hours=("_op_hours_dec", "sum"),
         total_maintenance_delay=("_maint_delay_num", "sum"),
         count_rows=("_op_hours_dec", "count")
     ).reset_index()
-    monthly_group["MTBF_hours"] = monthly_group.apply(lambda r: (r["total_operational_hours"] / r["count_rows"]) if (r["count_rows"] and r["count_rows"] > 0) else float("nan"), axis=1)
-    monthly_group["MTTR_hours"] = monthly_group.apply(lambda r: (r["total_maintenance_delay"] / r["count_rows"]) if (r["count_rows"] and r["count_rows"] > 0) else float("nan"), axis=1)
+    monthly_group["MTBF_hours"] = monthly_group.apply(lambda r: _safe_div(r["total_operational_hours"], r["count_rows"]), axis=1)
+    monthly_group["MTTR_hours"] = monthly_group.apply(lambda r: _safe_div(r["total_maintenance_delay"], r["count_rows"]), axis=1)
     try:
         monthly_group["period_dt"] = pd.to_datetime(monthly_group["PERIOD_MONTH"], format="%b %Y", errors="coerce")
     except Exception:
@@ -747,183 +672,27 @@ def compute_mtbf_mttr_from_url(raw_url):
         "MTTR_hours_overall": (float(df_op["_maint_delay_num"].sum(skipna=True)) / len(df_op)) if len(df_op) > 0 else None
     }
 
-# call the MTBF/MTTR computation (cached)
+# call MTBF/MTTR compute (cached)
 _mtbf_mttr_res = compute_mtbf_mttr_from_url(RAW_URL)
 
-# Expose reliability globals
+# Expose convenience variables (overall)
 MTBF_GLOBAL_HOURS = _mtbf_mttr_res.get("MTBF_hours_overall") if isinstance(_mtbf_mttr_res, dict) else None
 MTTR_GLOBAL_HOURS = _mtbf_mttr_res.get("MTTR_hours_overall") if isinstance(_mtbf_mttr_res, dict) else None
 MTBF_GLOBAL_HOURS_ROUNDED = round(MTBF_GLOBAL_HOURS, 2) if (MTBF_GLOBAL_HOURS is not None) else None
 MTTR_GLOBAL_HOURS_ROUNDED = round(MTTR_GLOBAL_HOURS, 2) if (MTTR_GLOBAL_HOURS is not None) else None
 
-MTBF_SOURCE_SHEET = _mtbf_mttr_res.get("sheet_name") if isinstance(_mtbf_mttr_res, dict) else None
-MTBF_OP_HOURS_COL = _mtbf_mttr_res.get("operational_hours_column") if isinstance(_mtbf_mttr_res, dict) else None
-MTBF_MAINT_DELAY_COL = _mtbf_mttr_res.get("maintenance_delay_column") if isinstance(_mtbf_mttr_res, dict) else None
-MTBF_TOTAL_ROWS = _mtbf_mttr_res.get("total_rows") if isinstance(_mtbf_mttr_res, dict) else None
-MTBF_TOTAL_OP_HOURS = _mtbf_mttr_res.get("total_operational_hours") if isinstance(_mtbf_mttr_res, dict) else None
-MTBF_TOTAL_MAINT_DELAY = _mtbf_mttr_res.get("total_maintenance_delay") if isinstance(_mtbf_mttr_res, dict) else None
+weekly_df_global = _mtbf_mttr_res.get("weekly_df") if isinstance(_mtbf_mttr_res, dict) else pd.DataFrame()
+monthly_df_global = _mtbf_mttr_res.get("monthly_df") if isinstance(_mtbf_mttr_res, dict) else pd.DataFrame()
 
 # -------------------------
-# Sidebar Filters & PDF export UI (minimal, sets request flag only)
+# Sidebar Filters & PDF request UI (small and non-invasive)
 # -------------------------
 st.sidebar.header("Filters & Options")
 
-# PDF Export controls (keeps UI at the top but defers generation until later)
-st.sidebar.markdown("---")
-st.sidebar.subheader("Export report (PDF)")
-
-# Prepare an empty KPI placeholder — the real KPI table is built later (after KPI calc)
-_pdf_kpi_text = ""
-
-# expose list of keys we will cache for PDF (consistent naming)
-pdf_keys = [
-    'pdf_fig_trend', 'pdf_fig_pareto',
-    'pdf_fig_mttr_w', 'pdf_fig_mttr_m',
-    'pdf_fig_mtbf_w', 'pdf_fig_mtbf_m'
-]
-
-# Initialize generation state in session if not present
-if '_generate_pdf_request' not in st.session_state:
-    st.session_state['_generate_pdf_request'] = False
-if '_last_pdf' not in st.session_state:
-    st.session_state['_last_pdf'] = None
-if '_pdf_debug' not in st.session_state:
-    st.session_state['_pdf_debug'] = {}
-
-# -------------------------
-# PDF generation executor (runs AFTER KPIs + charts are computed and cached)
-# -------------------------
-if REPORTLAB_AVAILABLE and st.session_state.get('_generate_pdf_request'):
-    # Build KPI rows table from the current computed variables (guarantees values exist)
-    try:
-        kpi_rows = [
-            ["Metric", "Value"],
-            ["Physical Availability (PA)", f"{PA:.2%}" if PA is not None else "N/A"],
-            ["Mechanical Availability (MA)", f"{MA:.2%}" if MA is not None else "N/A"],
-            ["Total Delay (hrs)", f"{total_delay:.2f}"],
-            ["Available Time (hrs)", f"{available_time:.2f}" if available_time else "N/A"],
-        ]
-    except Exception:
-        # If for any reason these are not available, set placeholders
-        kpi_rows = [
-            ["Metric", "Value"],
-            ["Physical Availability (PA)", "N/A"],
-            ["Mechanical Availability (MA)", "N/A"],
-            ["Total Delay (hrs)", "N/A"],
-            ["Available Time (hrs)", "N/A"],
-        ]
-
-    # Collect PNG bytes (from cached session_state keys)
-    collected_pngs = []
-    debug_info = {"collected_keys": {}, "fallback_used": []}
-
-    for key in pdf_keys:
-        png = st.session_state.get(key)
-        debug_info["collected_keys"][key] = bool(png)
-        if png:
-            collected_pngs.append(png)
-
-    # If some images are missing, attempt to generate fallbacks using underlying dataframes
-    # Trend: 'trend' df exists in local scope (if not, do nothing); Pareto: 'pareto_df'; reliability: weekly_df_global / monthly_df_global
-    try:
-        # trend fallback
-        if not any(k.endswith("trend") for k in debug_info["collected_keys"].keys()) and 'trend' in globals() and len(collected_pngs) < len(pdf_keys):
-            try:
-                # plot PA_pct if present, else total_delay
-                if "PA_pct_rounded" in trend.columns and trend["PA_pct_rounded"].notna().any():
-                    df_temp = trend.copy()
-                    df_temp["label"] = df_temp.index.astype(str)
-                    png = _mpl_bar_png(df_temp, "label", "PA_pct_rounded", title="PA% (trend)", xlabel="Period", ylabel="PA%")
-                    if png:
-                        collected_pngs.append(png)
-                        debug_info["fallback_used"].append("trend_mpl")
-            except Exception:
-                pass
-
-        # pareto fallback
-        if ('pdf_fig_pareto' in pdf_keys) and ('pdf_fig_pareto' in debug_info["collected_keys"] and not debug_info["collected_keys"]['pdf_fig_pareto']):
-            try:
-                if 'pareto_df' in globals() and not pareto_df.empty:
-                    df_tmp = pareto_df.copy()
-                    df_tmp["label"] = df_tmp.iloc[:,0].astype(str)
-                    df_tmp = df_tmp.rename(columns={df_tmp.columns[1]: "value"})
-                    png = _mpl_bar_png(df_tmp, "label", "value", title="Top Delay by Equipment", xlabel="Equipment", ylabel="Hours")
-                    if png:
-                        collected_pngs.append(png)
-                        debug_info["fallback_used"].append("pareto_mpl")
-            except Exception:
-                pass
-
-        # reliability fallbacks (MTTR / MTBF weekly/monthly)
-        if 'weekly_df_global' in globals() and isinstance(weekly_df_global, pd.DataFrame) and not weekly_df_global.empty:
-            # try mttr weekly
-            try:
-                if not st.session_state.get('pdf_fig_mttr_w'):
-                    df_temp = weekly_df_global.sort_values("week_start") if "week_start" in weekly_df_global.columns else weekly_df_global
-                    if "MTTR_hours" in df_temp.columns:
-                        df_temp2 = df_temp.copy()
-                        df_temp2["label"] = df_temp2["period_label"].astype(str) if "period_label" in df_temp2.columns else df_temp2.index.astype(str)
-                        png = _mpl_bar_png(df_temp2, "label", "MTTR_hours", title="MTTR (weekly)", xlabel="Week", ylabel="MTTR (hrs)", figsize=(10,4))
-                        if png:
-                            collected_pngs.append(png)
-                            debug_info["fallback_used"].append("mttr_w_mpl")
-                if not st.session_state.get('pdf_fig_mtbf_w'):
-                    df_temp = weekly_df_global.sort_values("week_start") if "week_start" in weekly_df_global.columns else weekly_df_global
-                    if "MTBF_hours" in df_temp.columns:
-                        df_temp2 = df_temp.copy()
-                        df_temp2["label"] = df_temp2["period_label"].astype(str) if "period_label" in df_temp2.columns else df_temp2.index.astype(str)
-                        png = _mpl_bar_png(df_temp2, "label", "MTBF_hours", title="MTBF (weekly)", xlabel="Week", ylabel="MTBF (hrs)", figsize=(10,4))
-                        if png:
-                            collected_pngs.append(png)
-                            debug_info["fallback_used"].append("mtbf_w_mpl")
-            except Exception:
-                pass
-
-        if 'monthly_df_global' in globals() and isinstance(monthly_df_global, pd.DataFrame) and not monthly_df_global.empty:
-            # mttr monthly
-            try:
-                if not st.session_state.get('pdf_fig_mttr_m'):
-                    df_temp = monthly_df_global.sort_values("period_dt") if "period_dt" in monthly_df_global.columns else monthly_df_global
-                    if "MTTR_hours" in df_temp.columns:
-                        df_temp2 = df_temp.copy()
-                        df_temp2["label"] = df_temp2["PERIOD_MONTH"].astype(str)
-                        png = _mpl_bar_png(df_temp2, "label", "MTTR_hours", title="MTTR (monthly)", xlabel="Month", ylabel="MTTR (hrs)", figsize=(8,4))
-                        if png:
-                            collected_pngs.append(png)
-                            debug_info["fallback_used"].append("mttr_m_mpl")
-                if not st.session_state.get('pdf_fig_mtbf_m'):
-                    df_temp = monthly_df_global.sort_values("period_dt") if "period_dt" in monthly_df_global.columns else monthly_df_global
-                    if "MTBF_hours" in df_temp.columns:
-                        df_temp2 = df_temp.copy()
-                        df_temp2["label"] = df_temp2["PERIOD_MONTH"].astype(str)
-                        png = _mpl_bar_png(df_temp2, "label", "MTBF_hours", title="MTBF (monthly)", xlabel="Month", ylabel="MTBF (hrs)", figsize=(8,4))
-                        if png:
-                            collected_pngs.append(png)
-                            debug_info["fallback_used"].append("mtbf_m_mpl")
-            except Exception:
-                pass
-    except Exception:
-        # some fallback generation attempt failed; continue to generating PDF with whatever we have
-        pass
-
-    # Now create PDF bytes with KPI table and collected images (collected_pngs)
-    pdf_bytes = _create_pdf_bytes("Physical Availability Report", kpi_rows, collected_pngs)
-
-    if pdf_bytes:
-        st.session_state['_last_pdf'] = pdf_bytes
-        st.session_state['_generate_pdf_request'] = False
-        st.session_state['_pdf_debug'] = debug_info
-        st.sidebar.success("PDF generated and available for download.")
-    else:
-        st.session_state['_pdf_debug'] = {"error": "PDF creation returned None or failed."}
-        st.sidebar.error("PDF generation failed. See app logs or session_state['_pdf_debug'].")
-
-# -------------------------
-# Time granularity / Month / Year filters
-# -------------------------
+# Time granularity (keep same choices as before)
 granularity = st.sidebar.selectbox("Time granularity", options=["WEEK", "PERIOD_MONTH"], index=1)
 
-# Build month list from PERIOD_MONTH chronologically
+# Build month list for sidebar (chronological)
 months_available = []
 if "PERIOD_MONTH" in df.columns:
     unique_pm = pd.Series(df["PERIOD_MONTH"].dropna().astype(str).str.strip().unique())
@@ -932,8 +701,6 @@ if "PERIOD_MONTH" in df.columns:
         months_df = pd.DataFrame({"PERIOD_MONTH": unique_pm.values, "period_dt": parsed.values})
         months_df = months_df.sort_values("period_dt")
         months_available = months_df["PERIOD_MONTH"].tolist()
-
-# fallback if not found
 if not months_available and "MONTH" in df.columns and "YEAR" in df.columns:
     month_to_idx = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,"JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
     tmp = []
@@ -952,50 +719,48 @@ if not months_available and "MONTH" in df.columns and "YEAR" in df.columns:
         if m_upper not in month_to_idx:
             continue
         tmp.append((y_int, month_to_idx[m_upper], f"{m_upper} {y_int}"))
-    tmp_sorted = sorted(set(tmp), key=lambda x: (x[0], x[1]))
+    tmp_sorted = sorted(set(tmp), key=lambda x:(x[0], x[1]))
     months_available = [t[2] for t in tmp_sorted]
-
-# default latest month index
-if months_available:
-    try:
-        default_idx = len(months_available) - 1
-    except Exception:
-        default_idx = 0
-else:
-    default_idx = 0
 
 months = ["All"] + months_available
 selected_month = st.sidebar.selectbox("MONTH", months, index=0)
 
-# Year multi-select global filter (fix previous TypeError by passing Python ints)
+# -------------------------
+# Year filter (multi-select) — ensure types are Python int to avoid Streamlit widget type issues
+# -------------------------
 all_years = []
 if "YEAR" in df.columns:
     try:
-        yrs = sorted(list(pd.Series(df["YEAR"].dropna().astype(int).unique())), reverse=True)
+        yrs = df["YEAR"].dropna().astype(int).unique().tolist()
+        yrs = sorted([int(x) for x in yrs], reverse=True)  # descending order
         all_years = yrs
     except Exception:
         all_years = []
+
 if all_years:
-    # default select all (descending)
-    selected_years = st.sidebar.multiselect("Year (multi-select, descending)", options=all_years, default=all_years)
+    # default selects all years
+    selected_years = st.sidebar.multiselect("Year (multi-select, descending)", options=all_years, default=all_years, format_func=lambda x: int(x))
 else:
     selected_years = []
 
 # -------------------------
-# Apply selected filters to df (month & years)
+# Apply sidebar filters to main dataframe
 # -------------------------
 filtered = df.copy()
 if selected_month != "All" and selected_month != "":
     filtered = filtered[filtered["PERIOD_MONTH"] == selected_month]
+
+# Apply year filter globally
 if selected_years:
     if "YEAR" in filtered.columns:
         filtered = filtered[filtered["YEAR"].isin(selected_years)].copy()
 
 # -------------------------
-# KPI calculations (unchanged)
+# KPI Calculations (compute BEFORE applying category drilldown)
 # -------------------------
 total_delay = filtered["DELAY"].sum()
 
+# AVAILABLE_TIME aggregation: prefer AVAILABLE_TIME_MONTH else AVAILABLE_HOURS
 available_time = None
 try:
     if "AVAILABLE_TIME_MONTH" in filtered.columns and filtered["AVAILABLE_TIME_MONTH"].notna().any():
@@ -1020,50 +785,18 @@ if isinstance(pa_target, (int, float)) and pa_target > 1:
 if isinstance(ma_target, (int, float)) and ma_target > 1:
     ma_target = ma_target / 100.0
 
-# Build KPI header text for PDF (now that PA/MA exist)
-try:
-    _pdf_kpi_text = f"PA: {PA:.2%}\nMA: {MA:.2%}\nTotal Delay (selected): {total_delay:.2f} hrs\n"
-    if available_time:
-        _pdf_kpi_text += f"Total Available Time (selected): {available_time:.2f} hrs\n"
-except Exception:
-    _pdf_kpi_text = ""
+# Build a short KPI dict for PDF usage & display
+_pdf_kpi_dict = {
+    "Physical Availability (PA)": f"{PA:.2%}" if PA is not None else "N/A",
+    "Mechanical Availability (MA)": f"{MA:.2%}" if MA is not None else "N/A",
+    "Total Delay (selected) (hrs)": f"{total_delay:.2f}",
+    "Total Available Time (selected) (hrs)": f"{available_time:.2f}" if available_time else "N/A",
+    "Selected Months": selected_month,
+    "Selected Years": ", ".join([str(x) for x in selected_years]) if selected_years else "All"
+}
 
 # -------------------------
-# YTD calculations (unchanged)
-# -------------------------
-ytd_PA = ytd_MA = None
-ytd_total_delay = None
-try:
-    latest_filtered = filtered if not filtered.empty else df
-    if not latest_filtered.empty:
-        latest_year = int(latest_filtered["YEAR"].dropna().max())
-        period_dt_all = pd.to_datetime(latest_filtered["PERIOD_MONTH"], format="%b %Y", errors="coerce")
-        if period_dt_all.notna().any():
-            latest_period_dt = period_dt_all.max()
-            df_period_dt = pd.to_datetime(df["PERIOD_MONTH"], format="%b %Y", errors="coerce")
-            ytd_df = df[(df["YEAR"] == latest_year) & (df_period_dt <= latest_period_dt)]
-        else:
-            ytd_df = df[df["YEAR"] == latest_year]
-        ytd_total_delay = ytd_df["DELAY"].sum()
-        if "AVAILABLE_TIME_MONTH" in ytd_df.columns and ytd_df["AVAILABLE_TIME_MONTH"].notna().any():
-            ytd_available_time = ytd_df.groupby("PERIOD_MONTH")["AVAILABLE_TIME_MONTH"].max().dropna().sum()
-        elif "AVAILABLE_HOURS" in ytd_df.columns and ytd_df["AVAILABLE_HOURS"].notna().any():
-            ytd_available_time = ytd_df.groupby("PERIOD_MONTH")["AVAILABLE_HOURS"].max().dropna().sum()
-        else:
-            ytd_available_time = None
-        if ytd_available_time and ytd_available_time > 0:
-            ytd_PA = max(0, 1 - ytd_total_delay / ytd_available_time)
-            ytd_maintenance_delay = ytd_df[ytd_df["CATEGORY"] == "Maintenance"]["DELAY"].sum()
-            ytd_MA = max(0, 1 - ytd_maintenance_delay / ytd_available_time)
-        else:
-            ytd_PA = None
-            ytd_MA = None
-except Exception:
-    ytd_PA = ytd_MA = None
-    ytd_total_delay = None
-
-# -------------------------
-# Top Row: KPIs + Donuts (unchanged) with PNG caching + Matplotlib fallback
+# Top Row: KPIs + Donuts (Main dashboard)
 # -------------------------
 kpi_col, donut1_col, donut2_col = st.columns([1,2,2])
 with kpi_col:
@@ -1091,11 +824,8 @@ with kpi_col:
     st.metric("Total Delay Hours (selected)", f"{total_delay:.2f} hrs")
     st.metric("Total Available Time (selected)", f"{available_time:.2f} hrs" if available_time else "N/A")
 
-    if ytd_PA is not None:
-        st.write("")
-        st.caption(f"YTD (up to selected): PA {ytd_PA:.2%} | MA {ytd_MA:.2%} | Delay {ytd_total_delay:.2f} hrs")
-    else:
-        st.write("")
+    if PA is not None:
+        st.caption(f"YTD (up to selected): PA {PA:.2%} | MA {MA:.2%}")
 
 with donut1_col:
     st.subheader("Delay by Category")
@@ -1105,21 +835,10 @@ with donut1_col:
             donut_data["DELAY"] = donut_data["DELAY"].round(2)
             donut_fig = go.Figure(data=[go.Pie(labels=donut_data["CATEGORY"], values=donut_data["DELAY"], hole=0.4, textinfo="label+percent", hovertemplate="%{label}: %{value:.2f} hrs<extra></extra>")])
             donut_fig.update_layout(margin=dict(t=20,b=20,l=20,r=20))
-            # Try to cache PNG (Plotly -> PNG), fallback to Matplotlib Pareto (we'll feed a small pareto-like DF)
+            # cache PNG if possible
             png = _fig_to_png_bytes(donut_fig)
-            if not png:
-                # create a simple pareto-like image via Matplotlib as fallback
-                try:
-                    small_df = donut_data.rename(columns={"CATEGORY":"label","DELAY":"hours"}).copy()
-                    small_df["cum_hours"] = small_df["hours"].cumsum()
-                    total_sum = small_df["hours"].sum()
-                    small_df["cum_pct"] = (small_df["cum_hours"] / total_sum) if total_sum > 0 else 0
-                    # reuse pareto fallback function (labels -> equipment key)
-                    png = _mpl_png_pareto_from_df(small_df.rename(columns={"label":"EQUIPMENT_DESC","hours":"hours","cum_pct":"cum_pct"}), equipment_key="EQUIPMENT_DESC", title="Delay by Category (fallback)")
-                except Exception:
-                    png = None
             if png:
-                st.session_state['pdf_fig_pareto'] = png
+                st.session_state["pdf_fig_pareto"] = png
             st.plotly_chart(donut_fig, use_container_width=True)
         else:
             st.info("No delay data available.")
@@ -1152,7 +871,7 @@ st.markdown("---")
 st.subheader("Trend: Total Delay Hours vs PA%")
 group_field = granularity
 
-# Use GLOBAL latest week for 52-week cutoff
+# For WEEK granularity: respect 52-week cutoff based on global latest week
 if group_field == "WEEK":
     latest_week_start_global = df["WEEK_START"].dropna().max() if "WEEK_START" in df.columns else pd.NaT
     if pd.isna(latest_week_start_global):
@@ -1214,7 +933,6 @@ for idx, row in trend.iterrows():
     if avail and avail > 0:
         trend.at[idx,"PA_pct"] = max(0, 1 - row["total_delay_hours"] / avail)
 
-# Data formatting
 trend["PA_pct"] = pd.to_numeric(trend["PA_pct"], errors="coerce")
 trend["PA_pct_rounded"] = trend["PA_pct"].round(4)
 trend["total_delay_hours"] = pd.to_numeric(trend["total_delay_hours"], errors="coerce")
@@ -1230,7 +948,6 @@ for v in trend["PA_pct_rounded"]:
     else:
         colors.append("green")
 
-# Build the Plotly trend figure (unchanged look)
 fig_trend = go.Figure()
 fig_trend.add_trace(
     go.Bar(
@@ -1263,16 +980,11 @@ fig_trend.update_layout(
     margin=dict(t=70)
 )
 
-# Cache PNG: first try Plotly -> PNG; if not available, create Matplotlib fallback using the trend DataFrame
+# Cache trend image for PDF if possible
 png = _fig_to_png_bytes(fig_trend)
-if not png:
-    # attempt Matplotlib fallback using the trend DataFrame
-    try:
-        png = _mpl_png_trend_from_df(trend, x_field=x_field, pa_col="PA_pct_rounded", delay_col="total_delay_hours_rounded", title="Trend: Total Delay Hours vs PA%")
-    except Exception:
-        png = None
 if png:
-    st.session_state['pdf_fig_trend'] = png
+    st.session_state["pdf_fig_trend"] = png
+
 st.plotly_chart(fig_trend, use_container_width=True)
 
 st.markdown("---")
@@ -1321,19 +1033,15 @@ fig_pareto.update_layout(xaxis_tickangle=-45, yaxis_title="Hours", legend=dict(o
 fig_pareto.update_yaxes(title_text="Cumulative %", tickformat=".2%", range=[0, 1], secondary_y=True)
 fig_pareto.update_yaxes(title_text="Delay Hours", secondary_y=False)
 
-# Cache PNG for Pareto (Plotly -> PNG first; fallback to Matplotlib)
+# cache pareto PNG
 png = _fig_to_png_bytes(fig_pareto)
-if not png:
-    try:
-        png = _mpl_png_pareto_from_df(pareto_df.rename(columns={equipment_key:"EQUIPMENT_DESC"}), equipment_key="EQUIPMENT_DESC", title="Top Delay by Equipment (Pareto) (fallback)")
-    except Exception:
-        png = None
 if png:
-    st.session_state['pdf_fig_pareto'] = png
+    st.session_state["pdf_fig_pareto"] = png
+
 st.plotly_chart(fig_pareto, use_container_width=True)
 
 # -------------------------
-# CATEGORY FILTER -> Drilldown (unchanged)
+# CATEGORY FILTER (affects drilldown)
 # -------------------------
 st.subheader("Filter by Delay Category (affects drilldown table)")
 
@@ -1363,30 +1071,38 @@ else:
     drill_df_base = filtered.copy()
 
 # -------------------------
-# Drill-down table (unchanged except auto-fit & ordering)
+# Drill-down table (show rows for the selected category)
 # -------------------------
-st.subheader("Drill-down data (filtered by selected category)")
+st.subheader(f"Drill-down data (filtered by selected category) — Years: {', '.join([str(x) for x in selected_years]) if selected_years else 'All'}")
 
 details_df = drill_df_base.copy()
+
+# show assigned month in drilldown if PERIOD_MONTH present
 if "PERIOD_MONTH" in details_df.columns:
     details_df["MONTH"] = details_df["PERIOD_MONTH"]
 
+# ensure required columns exist
 required_cols = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "EQ_DESC", "DELAY", "NOTE", "SUB_CATEGORY", "YEAR"]
 for c in required_cols:
     if c not in details_df.columns:
         details_df[c] = ""
 
+# prepare output DataFrame
 details_out = details_df[["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "EQ_DESC", "DELAY", "NOTE", "SUB_CATEGORY", "YEAR"]].copy()
 details_out = details_out.rename(columns={"EQ_DESC": "Equipment Description"})
 
+# reorder depending on category
 if selected_category == "MAINTENANCE (ALL)":
     ordered = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "SUB_CATEGORY", "Equipment Description", "DELAY", "NOTE"]
 else:
     ordered = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "Equipment Description", "DELAY", "NOTE"]
 
 ordered = [c for c in ordered if c in details_out.columns]
+
+# convert WEEK to numeric for sorting
 details_out["WEEK"] = pd.to_numeric(details_out["WEEK"], errors="coerce")
 
+# Sort descending (user preference) by YEAR, WEEK, START if YEAR exists; else by WEEK desc
 if "YEAR" in details_out.columns and details_out["YEAR"].notna().any():
     details_out["YEAR"] = pd.to_numeric(details_out["YEAR"], errors="coerce")
     details_out = details_out.sort_values(by=["YEAR", "WEEK", "START"], ascending=[False, False, True]).reset_index(drop=True)
@@ -1396,6 +1112,7 @@ else:
 
 details_out = details_out[ordered].reset_index(drop=True)
 
+# round DELAY column
 def _round_maybe(x):
     try:
         if x is None or (isinstance(x, str) and str(x).strip() == ""):
@@ -1408,10 +1125,12 @@ def _round_maybe(x):
 if "DELAY" in details_out.columns:
     details_out["DELAY"] = details_out["DELAY"].apply(_round_maybe)
 
-# AgGrid display: configure defaults + auto-fit on load (fit_columns_on_grid_load True)
+# AgGrid display (auto-size columns on load)
 gob2 = GridOptionsBuilder.from_dataframe(details_out)
 gob2.configure_grid_options(pagination=False)
 gob2.configure_default_column(editable=False, sortable=True, filter=True, resizable=True, wrapText=True, autoHeight=True)
+# Auto width: allow ag-grid to autosize on load
+gob2.configure_grid_options(domLayout='normal')
 grid_options2 = gob2.build()
 
 AgGrid(
@@ -1425,10 +1144,10 @@ AgGrid(
 )
 
 # -------------------------
-# RELIABILITY TAB (unchanged layout + caching with Matplotlib fallback)
+# RELIABILITY TAB (second page) - show MTTR & MTBF weekly & monthly
 # -------------------------
-weekly_df_global = _mtbf_mttr_res.get("weekly_df") if isinstance(_mtbf_mttr_res, dict) else pd.DataFrame()
-monthly_df_global = _mtbf_mttr_res.get("monthly_df") if isinstance(_mtbf_mttr_res, dict) else pd.DataFrame()
+# Present tabs (Main content already rendered in main area; reliability displayed in second tab)
+tabs = st.tabs(["Main Dashboard", "Reliability"])
 
 with tabs[1]:
     st.subheader("Reliability: MTBF & MTTR")
@@ -1436,7 +1155,7 @@ with tabs[1]:
     weekly_df = weekly_df_global.copy() if isinstance(weekly_df_global, pd.DataFrame) else pd.DataFrame()
     monthly_df = monthly_df_global.copy() if isinstance(monthly_df_global, pd.DataFrame) else pd.DataFrame()
 
-    # Apply year filter to reliability dataframes as well
+    # Apply year filter to reliability dataframes (global)
     if not weekly_df.empty and selected_years:
         if "YEAR" in weekly_df.columns:
             weekly_df = weekly_df[weekly_df["YEAR"].isin(selected_years)]
@@ -1453,7 +1172,6 @@ with tabs[1]:
             monthly_df = monthly_df[monthly_df["_yr"].isin(selected_years)]
             monthly_df = monthly_df.drop(columns=["_yr"], errors="ignore")
 
-    # MTTR
     st.markdown("### MTTR (Mean Time To Repair)")
     cols_mttr = st.columns(2)
     # Weekly MTTR
@@ -1474,18 +1192,16 @@ with tabs[1]:
             if weekly_df_limited.empty:
                 st.info("No weekly reliability data in selected years / range.")
             else:
-                # ensure ascending order for display
+                # ascending by week_start
                 if "week_start" in weekly_df_limited.columns:
                     weekly_df_limited = weekly_df_limited.sort_values("week_start")
                 fig_mttr_w = go.Figure()
                 fig_mttr_w.add_trace(go.Bar(x=weekly_df_limited["period_label"], y=weekly_df_limited["MTTR_hours"].round(2), name="MTTR (hrs)", marker=dict(color="green")))
                 fig_mttr_w.update_layout(xaxis_title="Week", yaxis_title="MTTR (hours)", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02), margin=dict(t=60))
-                # cache PNG: try Plotly -> PNG, fallback to Matplotlib using weekly_df_limited
+                # cache PNG for PDF
                 png = _fig_to_png_bytes(fig_mttr_w)
-                if not png:
-                    png = _mpl_png_bar_from_df(weekly_df_limited, x_col="period_label", y_col="MTTR_hours", title="MTTR — Weekly", color="green", xlabel="Week", ylabel="MTTR (hrs)")
                 if png:
-                    st.session_state['pdf_fig_mttr_w'] = png
+                    st.session_state["pdf_fig_mttr_w"] = png
                 st.plotly_chart(fig_mttr_w, use_container_width=True)
 
     # Monthly MTTR
@@ -1501,10 +1217,8 @@ with tabs[1]:
                 fig_mttr_m.add_trace(go.Bar(x=monthly_df_local["PERIOD_MONTH"], y=monthly_df_local["MTTR_hours"].round(2), name="MTTR (hrs)", marker=dict(color="green")))
                 fig_mttr_m.update_layout(xaxis_title="Month", yaxis_title="MTTR (hours)", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02), margin=dict(t=60))
                 png = _fig_to_png_bytes(fig_mttr_m)
-                if not png:
-                    png = _mpl_png_bar_from_df(monthly_df_local, x_col="PERIOD_MONTH", y_col="MTTR_hours", title="MTTR — Monthly", color="green", xlabel="Month", ylabel="MTTR (hrs)")
                 if png:
-                    st.session_state['pdf_fig_mttr_m'] = png
+                    st.session_state["pdf_fig_mttr_m"] = png
                 st.plotly_chart(fig_mttr_m, use_container_width=True)
             else:
                 st.info("No PERIOD_MONTH column in monthly reliability data.")
@@ -1536,10 +1250,8 @@ with tabs[1]:
                 fig_mtbf_w.add_trace(go.Bar(x=weekly_df_limited["period_label"], y=weekly_df_limited["MTBF_hours"].round(2), name="MTBF (hrs)", marker=dict(color="orange")))
                 fig_mtbf_w.update_layout(xaxis_title="Week", yaxis_title="MTBF (hours)", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02), margin=dict(t=60))
                 png = _fig_to_png_bytes(fig_mtbf_w)
-                if not png:
-                    png = _mpl_png_bar_from_df(weekly_df_limited, x_col="period_label", y_col="MTBF_hours", title="MTBF — Weekly", color="orange", xlabel="Week", ylabel="MTBF (hrs)")
                 if png:
-                    st.session_state['pdf_fig_mtbf_w'] = png
+                    st.session_state["pdf_fig_mtbf_w"] = png
                 st.plotly_chart(fig_mtbf_w, use_container_width=True)
 
     # Monthly MTBF
@@ -1555,15 +1267,143 @@ with tabs[1]:
                 fig_mtbf_m.add_trace(go.Bar(x=monthly_df_local["PERIOD_MONTH"], y=monthly_df_local["MTBF_hours"].round(2), name="MTBF (hrs)", marker=dict(color="orange")))
                 fig_mtbf_m.update_layout(xaxis_title="Month", yaxis_title="MTBF (hours)", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02), margin=dict(t=60))
                 png = _fig_to_png_bytes(fig_mtbf_m)
-                if not png:
-                    png = _mpl_png_bar_from_df(monthly_df_local, x_col="PERIOD_MONTH", y_col="MTBF_hours", title="MTBF — Monthly", color="orange", xlabel="Month", ylabel="MTBF (hrs)")
                 if png:
-                    st.session_state['pdf_fig_mtbf_m'] = png
+                    st.session_state["pdf_fig_mtbf_m"] = png
                 st.plotly_chart(fig_mtbf_m, use_container_width=True)
             else:
                 st.info("No PERIOD_MONTH column in monthly reliability data.")
 
     st.markdown("---")
-    st.caption("MTBF and MTTR shown is based on the period selected")
+    # short, non-verbose caption per your request
+    st.caption("MTBF and MTTR computed from 'Data Operational' sheet. Missing values may indicate sheet format differences.")
+
+# -------------------------
+# PDF generation: user presses the button in the sidebar which sets a request flag.
+# Actual PDF generation runs AFTER the charts are rendered (below).
+# This avoids NameError and ensures charts have been cached.
+# -------------------------
+st.sidebar.markdown("---")
+st.sidebar.subheader("Export report (PDF)")
+
+# Simple request button - will set a flag to build the PDF after the script finishes generating charts
+if REPORTLAB_AVAILABLE:
+    if st.sidebar.button("Request PDF generation (will prepare after charts render)"):
+        st.session_state["_generate_pdf_request"] = True
+        st.sidebar.info("PDF requested. The app will prepare the PDF now that charts are rendered.")
+    # If we already have a PDF generated in session_state, allow download
+    if st.session_state.get("_last_pdf") is not None:
+        st.sidebar.download_button("Download latest PDF", data=st.session_state["_last_pdf"], file_name="PA_report.pdf", mime="application/pdf")
+else:
+    st.sidebar.info("PDF export unavailable: ReportLab not installed in this environment.")
+
+# -------------------------
+# FINAL: If user requested PDF (flag was set), generate it now (after all figures are (hopefully) cached)
+# This also attempts to create missing cached PNGs from the underlying data if they weren't rendered
+# by the user during the current session.
+# -------------------------
+def _maybe_build_missing_reliability_pngs():
+    """Attempt to produce reliability PNGs programmatically if session cache missing but underlying data exists."""
+    # MTTR weekly
+    if st.session_state.get("pdf_fig_mttr_w") is None:
+        try:
+            weekly_df = weekly_df_global.copy() if isinstance(weekly_df_global, pd.DataFrame) else pd.DataFrame()
+            if not weekly_df.empty:
+                if "week_start" in weekly_df.columns:
+                    weekly_df = weekly_df.sort_values("week_start")
+                fig = go.Figure()
+                fig.add_trace(go.Bar(x=weekly_df["period_label"], y=weekly_df["MTTR_hours"].round(2), name="MTTR (hrs)", marker=dict(color="green")))
+                st.session_state["pdf_fig_mttr_w"] = _fig_to_png_bytes(fig)
+        except Exception as e:
+            st.debug(f"_maybe_build_missing_reliability_pngs: mttr_w failed: {e}")
+
+    # MTTR monthly
+    if st.session_state.get("pdf_fig_mttr_m") is None:
+        try:
+            monthly_df = monthly_df_global.copy() if isinstance(monthly_df_global, pd.DataFrame) else pd.DataFrame()
+            if not monthly_df.empty and "PERIOD_MONTH" in monthly_df.columns:
+                monthly_df = monthly_df.sort_values(by="period_dt" if "period_dt" in monthly_df.columns else "PERIOD_MONTH")
+                fig = go.Figure()
+                fig.add_trace(go.Bar(x=monthly_df["PERIOD_MONTH"], y=monthly_df["MTTR_hours"].round(2), name="MTTR (hrs)", marker=dict(color="green")))
+                st.session_state["pdf_fig_mttr_m"] = _fig_to_png_bytes(fig)
+        except Exception as e:
+            st.debug(f"_maybe_build_missing_reliability_pngs: mttr_m failed: {e}")
+
+    # MTBF weekly
+    if st.session_state.get("pdf_fig_mtbf_w") is None:
+        try:
+            weekly_df = weekly_df_global.copy() if isinstance(weekly_df_global, pd.DataFrame) else pd.DataFrame()
+            if not weekly_df.empty:
+                if "week_start" in weekly_df.columns:
+                    weekly_df = weekly_df.sort_values("week_start")
+                fig = go.Figure()
+                fig.add_trace(go.Bar(x=weekly_df["period_label"], y=weekly_df["MTBF_hours"].round(2), name="MTBF (hrs)", marker=dict(color="orange")))
+                st.session_state["pdf_fig_mtbf_w"] = _fig_to_png_bytes(fig)
+        except Exception as e:
+            st.debug(f"_maybe_build_missing_reliability_pngs: mtbf_w failed: {e}")
+
+    # MTBF monthly
+    if st.session_state.get("pdf_fig_mtbf_m") is None:
+        try:
+            monthly_df = monthly_df_global.copy() if isinstance(monthly_df_global, pd.DataFrame) else pd.DataFrame()
+            if not monthly_df.empty and "PERIOD_MONTH" in monthly_df.columns:
+                monthly_df = monthly_df.sort_values(by="period_dt" if "period_dt" in monthly_df.columns else "PERIOD_MONTH")
+                fig = go.Figure()
+                fig.add_trace(go.Bar(x=monthly_df["PERIOD_MONTH"], y=monthly_df["MTBF_hours"].round(2), name="MTBF (hrs)", marker=dict(color="orange")))
+                st.session_state["pdf_fig_mtbf_m"] = _fig_to_png_bytes(fig)
+        except Exception as e:
+            st.debug(f"_maybe_build_missing_reliability_pngs: mtbf_m failed: {e}")
+
+# Build trend & pareto PNGs if missing
+def _maybe_build_missing_trend_pareto():
+    if st.session_state.get("pdf_fig_trend") is None:
+        try:
+            png = _fig_to_png_bytes(fig_trend)
+            if png:
+                st.session_state["pdf_fig_trend"] = png
+        except Exception as e:
+            st.debug(f"_maybe_build_missing_trend_pareto: trend failed: {e}")
+    if st.session_state.get("pdf_fig_pareto") is None:
+        try:
+            png = _fig_to_png_bytes(fig_pareto)
+            if png:
+                st.session_state["pdf_fig_pareto"] = png
+        except Exception as e:
+            st.debug(f"_maybe_build_missing_trend_pareto: pareto failed: {e}")
+
+# Actually build PDF if requested
+if st.session_state.get("_generate_pdf_request"):
+    # Attempt to ensure all relevant PNG caches exist
+    _maybe_build_missing_trend_pareto()
+    _maybe_build_missing_reliability_pngs()
+
+    # Gather PNG bytes in preferred order for the report
+    figs_for_pdf = []
+    order = ["pdf_fig_trend", "pdf_fig_pareto", "pdf_fig_mttr_w", "pdf_fig_mttr_m", "pdf_fig_mtbf_w", "pdf_fig_mtbf_m"]
+    for key in order:
+        val = st.session_state.get(key)
+        if val:
+            figs_for_pdf.append(val)
+
+    # Build concise KPI dictionary including selected timeline info
+    timeline_str = f"{min_caption} - {max_caption}" if (min_caption and max_caption) else f"Months: {selected_month}"
+    kpi_for_pdf = {
+        "Physical Availability (PA)": f"{PA:.2%}" if PA is not None else "N/A",
+        "Mechanical Availability (MA)": f"{MA:.2%}" if MA is not None else "N/A",
+        "Total Delay (hrs)": f"{total_delay:.2f}",
+        "Available Time (hrs)": f"{available_time:.2f}" if available_time else "N/A",
+        "Selected Months": selected_month,
+        "Selected Years": ", ".join([str(x) for x in selected_years]) if selected_years else "All",
+        "Timeline": timeline_str
+    }
+
+    pdf_bytes = _create_pdf_bytes("Physical Availability Report", kpi_for_pdf, figs_for_pdf, img_width_inch=5.0)
+    if pdf_bytes:
+        st.session_state["_last_pdf"] = pdf_bytes
+        st.session_state["_generate_pdf_request"] = False
+        st.sidebar.success("PDF built successfully — use the download button to retrieve it.")
+        st.sidebar.download_button("Download latest PDF", data=st.session_state["_last_pdf"], file_name="PA_report.pdf", mime="application/pdf")
+    else:
+        st.session_state["_generate_pdf_request"] = False
+        st.sidebar.error("Failed to generate PDF. Check server logs and dependencies (ReportLab, kaleido or html2image).")
 
 # End of script

@@ -927,13 +927,13 @@ if REPORTLAB_AVAILABLE:
                     elif k in ['pdf_fig_mttr_w', 'pdf_fig_mttr_m', 'pdf_fig_mtbf_w', 'pdf_fig_mtbf_m']:
                         df_to_use = globals().get(f"{k[8:-2]}_df_limited" if k.endswith('w') else f"{k[8:-2]}_df_local")
                         if df_to_use is not None:
-                             x_col = "period_label" if k.endswith('w') else "PERIOD_MONTH"
-                             y_col = "MTTR_hours" if "mttr" in k else "MTBF_hours"
-                             color = "green" if "mttr" in k else "orange"
-                             title_str = f"{'MTTR' if 'mttr' in k else 'MTBF'} — {'Weekly' if k.endswith('w') else 'Monthly'}"
-                             png = _mpl_png_bar_from_df(df_to_use, x_col=x_col, y_col=y_col, title=title_str, color=color, xlabel="Week" if k.endswith('w') else "Month", ylabel=f"{'MTTR' if 'mttr' in k else 'MTBF'} (hrs)")
+                                x_col = "period_label" if k.endswith('w') else "PERIOD_MONTH"
+                                y_col = "MTTR_hours" if "mttr" in k else "MTBF_hours"
+                                color = "green" if "mttr" in k else "orange"
+                                title_str = f"{'MTTR' if 'mttr' in k else 'MTBF'} — {'Weekly' if k.endswith('w') else 'Monthly'}"
+                                png = _mpl_png_bar_from_df(df_to_use, x_col=x_col, y_col=y_col, title=title_str, color=color, xlabel="Week" if k.endswith('w') else "Month", ylabel=f"{'MTTR' if 'mttr' in k else 'MTBF'} (hrs)")
                         else:
-                             png = None
+                                png = None
                     else:
                         png = _fig_to_png_bytes(val)
 
@@ -1523,95 +1523,106 @@ with tabs[1]:
 
     st.markdown("---")
     st.caption("MTBF and MTTR shown is based on the period selected")
-    
+
+    # --- SECTION UPDATED AS PER YOUR REQUEST ---
+
     # -------------------------
     # New table: MTTR/MTBF per equipment
     # -------------------------
     st.subheader("MTTR & MTBF per Equipment")
 
-    # Define aggregation options
-    agg_options = ["WEEK", "PERIOD_MONTH"]
-    selected_agg = st.selectbox("Aggregate by", options=agg_options, key="equipment_agg_selector")
-
-    # Load data from both sheets and merge
+    # Load data from both sheets
     df_delay_time = df.copy()
     df_op = _mtbf_mttr_res.get("raw_df_op") if isinstance(_mtbf_mttr_res, dict) else pd.DataFrame()
-    
+
     if df_op.empty or df_delay_time.empty:
         st.info("Data for calculating per-equipment reliability metrics is unavailable.")
     else:
-        # Filter for maintenance delays only
+        # 1. Filter for maintenance delays only
         df_maint_delays = df_delay_time[df_delay_time['CATEGORY'] == 'Maintenance'].copy()
         
-        # Aggregate maintenance delays
-        delay_agg = df_maint_delays.groupby(['YEAR', 'WEEK', 'EQUIPMENT_DESC', 'PERIOD_MONTH']).agg(
+        # ## NEW ##: Filter out rows where EQUIPMENT_DESC is just a hyphen or empty
+        df_maint_delays = df_maint_delays[~df_maint_delays['EQUIPMENT_DESC'].isin(['-', '', None])]
+
+        # 2. Aggregate maintenance delays per equipment, per week
+        delay_agg = df_maint_delays.groupby(['YEAR', 'WEEK', 'PERIOD_MONTH', 'EQUIPMENT_DESC']).agg(
             total_maint_delay_hours=('DELAY', 'sum'),
-            maint_event_count=('DELAY', 'count')
+            maint_event_count=('DELAY', 'size') # using .size is robust for counting events
         ).reset_index()
 
-        # Aggregate operational hours
+        # 3. Aggregate operational hours per week (this is a plant-wide metric)
         op_agg = df_op.groupby(['YEAR', 'WEEK']).agg(
             total_operational_hours=('_op_hours_dec', 'sum')
         ).reset_index()
 
-        # Merge delay data with operational data
+        # 4. Merge delay data with operational data (This is the cross-check)
         merged_data = pd.merge(delay_agg, op_agg, on=['YEAR', 'WEEK'], how='left')
         
-        # Calculate MTTR and MTBF
-        merged_data['MTTR (hrs)'] = merged_data['total_maint_delay_hours'] / merged_data['maint_event_count']
-        merged_data['MTBF (hrs)'] = merged_data['total_operational_hours'] / merged_data['maint_event_count']
+        # 5. Calculate MTTR and MTBF for each equipment event group
+        # Ensure no division by zero
+        merged_data['MTTR'] = merged_data.apply(
+            lambda row: row['total_maint_delay_hours'] / row['maint_event_count'] if row['maint_event_count'] > 0 else 0,
+            axis=1
+        )
+        merged_data['MTBF'] = merged_data.apply(
+            lambda row: row['total_operational_hours'] / row['maint_event_count'] if row['maint_event_count'] > 0 else 0,
+            axis=1
+        )
 
-        # Select columns for final display
-        merged_data = merged_data[['YEAR', 'WEEK', 'PERIOD_MONTH', 'EQUIPMENT_DESC', 'MTTR (hrs)', 'MTBF (hrs)']].copy()
+        # ## UPDATED ##: Select and format the final columns as requested
+        display_df = merged_data[[
+            'YEAR',
+            'PERIOD_MONTH',
+            'WEEK',
+            'EQUIPMENT_DESC',
+            'MTTR',
+            'MTBF'
+        ]].copy()
         
-        # Handle aggregation based on user selection
-        if selected_agg == "WEEK":
-            display_df = merged_data.groupby(['YEAR', 'WEEK', 'EQUIPMENT_DESC']).agg(
-                **{'MTTR (hrs)': ('MTTR (hrs)', 'mean'), 'MTBF (hrs)': ('MTBF (hrs)', 'mean')}
-            ).reset_index()
-            display_df['Period'] = display_df['YEAR'].astype(str) + " W" + display_df['WEEK'].astype(str)
-            display_df = display_df.drop(columns=['YEAR', 'WEEK'])
-            order_list = ['Period', 'EQUIPMENT_DESC', 'MTTR (hrs)', 'MTBF (hrs)']
-        else: # PERIOD_MONTH
-            # Use categorical ordering for months
-            month_order = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-            month_year_order = sorted(merged_data['PERIOD_MONTH'].unique(), 
-                                      key=lambda x: (int(x.split(' ')[1]), month_order.index(x.split(' ')[0])))
-            
-            merged_data['PERIOD_MONTH_CAT'] = pd.Categorical(merged_data['PERIOD_MONTH'], categories=month_year_order, ordered=True)
-            display_df = merged_data.groupby(['YEAR', 'PERIOD_MONTH_CAT', 'EQUIPMENT_DESC']).agg(
-                **{'MTTR (hrs)': ('MTTR (hrs)', 'mean'), 'MTBF (hrs)': ('MTBF (hrs)', 'mean')}
-            ).reset_index()
-            display_df['Period'] = display_df['PERIOD_MONTH_CAT'].astype(str)
-            display_df = display_df.drop(columns=['YEAR', 'PERIOD_MONTH_CAT'])
-            order_list = ['Period', 'EQUIPMENT_DESC', 'MTTR (hrs)', 'MTBF (hrs)']
+        # Rename columns for better readability
+        display_df.rename(columns={
+            'PERIOD_MONTH': 'MONTH',
+            'EQUIPMENT_DESC': 'EQUIPMENT'
+        }, inplace=True)
 
-        # Clean and format for display
-        display_df = display_df[order_list].rename(columns={'EQUIPMENT_DESC': 'Equipment'})
-        display_df['MTTR (hrs)'] = display_df['MTTR (hrs)'].round(2)
-        display_df['MTBF (hrs)'] = display_df['MTBF (hrs)'].round(2)
+        # Round the final values
+        display_df['MTTR'] = display_df['MTTR'].round(2)
+        display_df['MTBF'] = display_df['MTBF'].round(2)
 
-        # AgGrid Display
-        st.markdown(f"#### MTTR and MTBF per Equipment ({selected_agg} view)")
+        # Sort the data for clear presentation
+        display_df = display_df.sort_values(by=['YEAR', 'WEEK'], ascending=[False, False]).reset_index(drop=True)
+
+        # Display in AgGrid
         if not display_df.empty:
             gob_equip = GridOptionsBuilder.from_dataframe(display_df)
-            gob_equip.configure_grid_options(pagination=True, paginationPageSize=15)
-            gob_equip.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
+            
+            # ## UPDATED ##: Disabled pagination
+            gob_equip.configure_grid_options(pagination=False) 
+            
+            gob_equip.configure_default_column(
+                editable=False, 
+                sortable=True, 
+                filter=True, 
+                resizable=True
+            )
             grid_options_equip = gob_equip.build()
 
             AgGrid(
                 display_df,
                 gridOptions=grid_options_equip,
-                update_mode=GridUpdateMode.MODEL_CHANGED,
+                update_mode=GridUpdateMode.NO_UPDATE,
                 allow_unsafe_jscode=False,
-                height=400,
-                width='100%',
+                height=500, # Adjusted height since pagination is off
+                fit_columns_on_grid_load=True, # For better layout
                 theme="balham"
             )
         else:
-            st.info(f"No per-equipment reliability data available for the selected filters.")
+            st.info("No per-equipment reliability data available for the selected filters.")
 
     st.markdown("---")
-    st.caption("MTBF and MTTR shown is based on the period selected")
+    st.caption("MTBF and MTTR are calculated weekly per equipment, based on the filters selected in the sidebar.")
+
+    # --- END OF UPDATED SECTION ---
+
 # END: RELIABILITY TAB CONTENT
 # -------------------------

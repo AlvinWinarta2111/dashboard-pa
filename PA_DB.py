@@ -184,7 +184,7 @@ def _create_pdf_bytes(title, kpi_text, png_byte_list):
         return None
 
     elements = []
-    styles = getSampleStyleSheet() if getSampleStyleSheet else None
+    styles = getSampleStyleStyleSheet() if getSampleStyleSheet else None
     title_style = styles.get("Heading1") if styles else None
     normal_style = styles.get("Normal") if styles else None
 
@@ -956,8 +956,7 @@ else:
 
 # -------------------------
 # Apply selected filters to df (month & years)
-# This section is now placed here, after all filters are defined, and before
-# any visualization code that uses 'filtered'. This solves the NameError.
+# NOTE: This is the critical block that needs to be moved to fix the NameError.
 # -------------------------
 filtered = df.copy()
 if selected_month != "All" and selected_month != "":

@@ -328,7 +328,7 @@ tabs = st.tabs(["Main Dashboard", "Reliability"])
 RAW_URL = "https://raw.githubusercontent.com/AlvinWinarta2111/dashboard-pa/refs/heads/main/Draft_New%20Version_Weekly_Report_Maintenance_CHPP.xlsx"
 
 # -------------------------
-# Load + Clean function (unchanged except minor safe guards)
+# Load + Clean function
 # -------------------------
 @st.cache_data(ttl=600)
 def load_data_from_url():
@@ -777,7 +777,7 @@ MTBF_TOTAL_OP_HOURS = _mtbf_mttr_res.get("total_operational_hours") if isinstanc
 MTBF_TOTAL_MAINT_DELAY = _mtbf_mttr_res.get("total_maintenance_delay") if isinstance(_mtbf_mttr_res, dict) else None
 
 # -------------------------
-# Sidebar Filters & PDF export UI (unchanged placement)
+# Sidebar Filters & PDF export UI
 # -------------------------
 st.sidebar.header("Filters & Options")
 st.sidebar.markdown("---")
@@ -804,7 +804,7 @@ if REPORTLAB_AVAILABLE:
     if st.sidebar.button("Generate PDF"):
         
         # -------------------------
-        # MOVE: KPI calculations and KPI text generation here
+        # KPI calculations and KPI text generation
         # -------------------------
         if not filtered.empty:
             total_delay = filtered["DELAY"].sum()
@@ -841,9 +841,6 @@ if REPORTLAB_AVAILABLE:
                 _pdf_kpi_text = ""
         else:
             _pdf_kpi_text = "Physical Availability (PA): N/A\nMechanical Availability (MA): N/A\nTotal Delay (hrs): N/A\nTotal Available Time: N/A"
-        # -------------------------
-        # END OF MOVED CODE
-        # -------------------------
         
         figs_for_pdf = []
 
@@ -969,7 +966,7 @@ else:
 months = ["All"] + months_available
 selected_month = st.sidebar.selectbox("MONTH", months, index=0)
 
-# Year multi-select global filter (fix previous TypeError by passing Python ints)
+# Year multi-select global filter
 all_years = []
 if "YEAR" in df.columns:
     try:
@@ -985,6 +982,7 @@ else:
 
 # -------------------------
 # Apply selected filters to df (month & years)
+# NOTE: This section is moved to the top-level scope to ensure 'filtered' is always defined.
 # -------------------------
 filtered = df.copy()
 if selected_month != "All" and selected_month != "":
@@ -1026,7 +1024,7 @@ with tabs[0]:
         ma_target = ma_target / 100.0
 
     # -------------------------
-    # YTD calculations (unchanged)
+    # YTD calculations
     # -------------------------
     ytd_PA = ytd_MA = None
     ytd_total_delay = None
@@ -1060,7 +1058,7 @@ with tabs[0]:
         ytd_total_delay = None
 
     # -------------------------
-    # Top Row: KPIs + Donuts (unchanged) with PNG caching + Matplotlib fallback
+    # Top Row: KPIs + Donuts with PNG caching + Matplotlib fallback
     # -------------------------
     kpi_col, donut1_col, donut2_col = st.columns([1,2,2])
     with kpi_col:
@@ -1330,7 +1328,7 @@ with tabs[0]:
     st.plotly_chart(fig_pareto, use_container_width=True)
 
     # -------------------------
-    # CATEGORY FILTER -> Drilldown (unchanged)
+    # CATEGORY FILTER -> Drilldown
     # -------------------------
     st.subheader("Filter by Delay Category (affects drilldown table)")
 
@@ -1368,18 +1366,18 @@ with tabs[0]:
     if "PERIOD_MONTH" in details_df.columns:
         details_df["MONTH"] = details_df["PERIOD_MONTH"]
 
-    required_cols = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "EQ_DESC", "DELAY", "NOTE", "PICA", "SUB_CATEGORY", "YEAR"] # ADDED 'PICA'
+    required_cols = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "EQ_DESC", "DELAY", "NOTE", "PICA", "SUB_CATEGORY", "YEAR"]
     for c in required_cols:
         if c not in details_df.columns:
             details_df[c] = ""
 
-    details_out = details_df[["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "EQ_DESC", "DELAY", "NOTE", "PICA", "SUB_CATEGORY", "YEAR"]].copy() # ADDED 'PICA'
+    details_out = details_df[["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "EQ_DESC", "DELAY", "NOTE", "PICA", "SUB_CATEGORY", "YEAR"]].copy()
     details_out = details_out.rename(columns={"EQ_DESC": "Equipment Description"})
 
     if selected_category == "MAINTENANCE (ALL)":
-        ordered = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "SUB_CATEGORY", "Equipment Description", "DELAY", "NOTE", "PICA"] # ADDED 'PICA'
+        ordered = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "SUB_CATEGORY", "Equipment Description", "DELAY", "NOTE", "PICA"]
     else:
-        ordered = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "Equipment Description", "DELAY", "NOTE", "PICA"] # ADDED 'PICA'
+        ordered = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "Equipment Description", "DELAY", "NOTE", "PICA"]
 
     ordered = [c for c in ordered if c in details_out.columns]
     details_out["WEEK"] = pd.to_numeric(details_out["WEEK"], errors="coerce")

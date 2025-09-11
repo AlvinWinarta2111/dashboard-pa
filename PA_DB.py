@@ -782,9 +782,6 @@ st.sidebar.header("Filters & Options")
 st.sidebar.markdown("---")
 st.sidebar.subheader("Export report (PDF)")
 
-# Note: we will build the KPI text later when PA/MA exist; build a placeholder now
-_pdf_kpi_text = ""
-
 # -------------------------
 # PDF generation button (uses cached PNG bytes or will try to produce PNGs from available Plotly figs)
 # -------------------------
@@ -804,6 +801,47 @@ pdf_keys = globals().get(
 if REPORTLAB_AVAILABLE:
     # Generate PDF when user clicks button
     if st.sidebar.button("Generate PDF"):
+        
+        # -------------------------
+        # MOVE: KPI calculations and KPI text generation here
+        # -------------------------
+        total_delay = filtered["DELAY"].sum()
+
+        available_time = None
+        try:
+            if "AVAILABLE_TIME_MONTH" in filtered.columns and filtered["AVAILABLE_TIME_MONTH"].notna().any():
+                available_time = filtered.groupby("PERIOD_MONTH", dropna=True)["AVAILABLE_TIME_MONTH"].max().dropna().sum()
+            elif "AVAILABLE_HOURS" in filtered.columns and filtered["AVAILABLE_HOURS"].notna().any():
+                available_time = filtered.groupby("PERIOD_MONTH", dropna=True)["AVAILABLE_HOURS"].max().dropna().sum()
+            else:
+                available_time = None
+        except Exception:
+            available_time = None
+
+        PA = max(0, 1 - total_delay / available_time) if (available_time and available_time > 0) else None
+        maintenance_delay = filtered[filtered["CATEGORY"] == "Maintenance"]["DELAY"].sum() if "CATEGORY" in filtered.columns else 0
+        MA = max(0, 1 - maintenance_delay / available_time) if (available_time and available_time > 0) else None
+
+        pa_target = filtered["PA_TARGET"].dropna().unique().tolist() if "PA_TARGET" in filtered.columns else []
+        ma_target = filtered["MA_TARGET"].dropna().unique().tolist() if "MA_TARGET" in filtered.columns else []
+        pa_target = pa_target[0] if pa_target else 0.9
+        ma_target = ma_target[0] if ma_target else 0.85
+        if isinstance(pa_target, (int, float)) and pa_target > 1:
+            pa_target = pa_target / 100.0
+        if isinstance(ma_target, (int, float)) and ma_target > 1:
+            ma_target = ma_target / 100.0
+
+        # Build KPI header text for PDF
+        try:
+            _pdf_kpi_text = f"PA: {PA:.2%}\nMA: {MA:.2%}\nTotal Delay (selected): {total_delay:.2f} hrs\n"
+            if available_time:
+                _pdf_kpi_text += f"Total Available Time (selected): {available_time:.2f} hrs\n"
+        except Exception:
+            _pdf_kpi_text = ""
+        # -------------------------
+        # END OF MOVED CODE
+        # -------------------------
+        
         figs_for_pdf = []
 
         # 1) Collect PNG bytes already cached in session_state
@@ -957,10 +995,9 @@ if selected_years:
 # -------------------------
 with tabs[0]:
     # -------------------------
-    # KPI calculations (unchanged)
+    # KPI calculations for display on dashboard
     # -------------------------
     total_delay = filtered["DELAY"].sum()
-
     available_time = None
     try:
         if "AVAILABLE_TIME_MONTH" in filtered.columns and filtered["AVAILABLE_TIME_MONTH"].notna().any():
@@ -971,11 +1008,11 @@ with tabs[0]:
             available_time = None
     except Exception:
         available_time = None
-
+    
     PA = max(0, 1 - total_delay / available_time) if (available_time and available_time > 0) else None
     maintenance_delay = filtered[filtered["CATEGORY"] == "Maintenance"]["DELAY"].sum() if "CATEGORY" in filtered.columns else 0
     MA = max(0, 1 - maintenance_delay / available_time) if (available_time and available_time > 0) else None
-
+    
     pa_target = filtered["PA_TARGET"].dropna().unique().tolist() if "PA_TARGET" in filtered.columns else []
     ma_target = filtered["MA_TARGET"].dropna().unique().tolist() if "MA_TARGET" in filtered.columns else []
     pa_target = pa_target[0] if pa_target else 0.9
@@ -984,14 +1021,6 @@ with tabs[0]:
         pa_target = pa_target / 100.0
     if isinstance(ma_target, (int, float)) and ma_target > 1:
         ma_target = ma_target / 100.0
-
-    # Build KPI header text for PDF (now that PA/MA exist)
-    try:
-        _pdf_kpi_text = f"PA: {PA:.2%}\nMA: {MA:.2%}\nTotal Delay (selected): {total_delay:.2f} hrs\n"
-        if available_time:
-            _pdf_kpi_text += f"Total Available Time (selected): {available_time:.2f} hrs\n"
-    except Exception:
-        _pdf_kpi_text = ""
 
     # -------------------------
     # YTD calculations (unchanged)

@@ -369,6 +369,7 @@ def load_data_from_url():
         "PA TARGET": "PA_TARGET",
         "MTN NOTE": "MTN_NOTE",
         "NOTE": "NOTE",
+        "PICA": "PICA", # ADDED
         "START": "START",
         "STOP": "STOP",
         "EQUIPMENT": "EQUIPMENT",
@@ -424,7 +425,7 @@ def load_data_from_url():
             df["STOP"] = ""
 
     # Ensure presence of helpful columns and cast to string where appropriate
-    for cat in ["MTN_DELAY_TYPE", "SCH_MTN", "UNSCH_MTN", "MINING_DELAY", "WEATHER_DELAY", "OTHER_DELAY", "MTN_NOTE", "NOTE", "EQ_DESC", "EQUIPMENT", "CATEGORY", "PERIOD_MONTH", "DATE"]:
+    for cat in ["MTN_DELAY_TYPE", "SCH_MTN", "UNSCH_MTN", "MINING_DELAY", "WEATHER_DELAY", "OTHER_DELAY", "MTN_NOTE", "NOTE", "PICA", "EQ_DESC", "EQUIPMENT", "CATEGORY", "PERIOD_MONTH", "DATE"]: # ADDED 'PICA'
         if cat in df.columns:
             df[cat] = df[cat].fillna("").astype(str).str.strip()
         else:
@@ -462,7 +463,7 @@ def load_data_from_url():
     # Compose CAUSE for pareto fallback
     def compose_cause(r):
         parts = []
-        for c in ["MTN_DELAY_TYPE", "SCH_MTN", "UNSCH_MTN", "MINING_DELAY", "WEATHER_DELAY", "OTHER_DELAY", "MTN_NOTE", "NOTE"]:
+        for c in ["MTN_DELAY_TYPE", "SCH_MTN", "UNSCH_MTN", "MINING_DELAY", "WEATHER_DELAY", "OTHER_DELAY", "MTN_NOTE", "NOTE", "PICA"]: # ADDED 'PICA'
             v = r.get(c)
             if v is not None:
                 vs = str(v).strip()
@@ -805,39 +806,41 @@ if REPORTLAB_AVAILABLE:
         # -------------------------
         # MOVE: KPI calculations and KPI text generation here
         # -------------------------
-        total_delay = filtered["DELAY"].sum()
-
-        available_time = None
-        try:
-            if "AVAILABLE_TIME_MONTH" in filtered.columns and filtered["AVAILABLE_TIME_MONTH"].notna().any():
-                available_time = filtered.groupby("PERIOD_MONTH", dropna=True)["AVAILABLE_TIME_MONTH"].max().dropna().sum()
-            elif "AVAILABLE_HOURS" in filtered.columns and filtered["AVAILABLE_HOURS"].notna().any():
-                available_time = filtered.groupby("PERIOD_MONTH", dropna=True)["AVAILABLE_HOURS"].max().dropna().sum()
-            else:
-                available_time = None
-        except Exception:
+        if not filtered.empty:
+            total_delay = filtered["DELAY"].sum()
             available_time = None
-
-        PA = max(0, 1 - total_delay / available_time) if (available_time and available_time > 0) else None
-        maintenance_delay = filtered[filtered["CATEGORY"] == "Maintenance"]["DELAY"].sum() if "CATEGORY" in filtered.columns else 0
-        MA = max(0, 1 - maintenance_delay / available_time) if (available_time and available_time > 0) else None
-
-        pa_target = filtered["PA_TARGET"].dropna().unique().tolist() if "PA_TARGET" in filtered.columns else []
-        ma_target = filtered["MA_TARGET"].dropna().unique().tolist() if "MA_TARGET" in filtered.columns else []
-        pa_target = pa_target[0] if pa_target else 0.9
-        ma_target = ma_target[0] if ma_target else 0.85
-        if isinstance(pa_target, (int, float)) and pa_target > 1:
-            pa_target = pa_target / 100.0
-        if isinstance(ma_target, (int, float)) and ma_target > 1:
-            ma_target = ma_target / 100.0
-
-        # Build KPI header text for PDF
-        try:
-            _pdf_kpi_text = f"PA: {PA:.2%}\nMA: {MA:.2%}\nTotal Delay (selected): {total_delay:.2f} hrs\n"
-            if available_time:
-                _pdf_kpi_text += f"Total Available Time (selected): {available_time:.2f} hrs\n"
-        except Exception:
-            _pdf_kpi_text = ""
+            try:
+                if "AVAILABLE_TIME_MONTH" in filtered.columns and filtered["AVAILABLE_TIME_MONTH"].notna().any():
+                    available_time = filtered.groupby("PERIOD_MONTH", dropna=True)["AVAILABLE_TIME_MONTH"].max().dropna().sum()
+                elif "AVAILABLE_HOURS" in filtered.columns and filtered["AVAILABLE_HOURS"].notna().any():
+                    available_time = filtered.groupby("PERIOD_MONTH", dropna=True)["AVAILABLE_HOURS"].max().dropna().sum()
+                else:
+                    available_time = None
+            except Exception:
+                available_time = None
+            
+            PA = max(0, 1 - total_delay / available_time) if (available_time and available_time > 0) else None
+            maintenance_delay = filtered[filtered["CATEGORY"] == "Maintenance"]["DELAY"].sum() if "CATEGORY" in filtered.columns else 0
+            MA = max(0, 1 - maintenance_delay / available_time) if (available_time and available_time > 0) else None
+            
+            pa_target = filtered["PA_TARGET"].dropna().unique().tolist() if "PA_TARGET" in filtered.columns else []
+            ma_target = filtered["MA_TARGET"].dropna().unique().tolist() if "MA_TARGET" in filtered.columns else []
+            pa_target = pa_target[0] if pa_target else 0.9
+            ma_target = ma_target[0] if ma_target else 0.85
+            if isinstance(pa_target, (int, float)) and pa_target > 1:
+                pa_target = pa_target / 100.0
+            if isinstance(ma_target, (int, float)) and ma_target > 1:
+                ma_target = ma_target / 100.0
+        
+            # Build KPI header text for PDF
+            try:
+                _pdf_kpi_text = f"PA: {PA:.2%}\nMA: {MA:.2%}\nTotal Delay (selected): {total_delay:.2f} hrs\n"
+                if available_time:
+                    _pdf_kpi_text += f"Total Available Time (selected): {available_time:.2f} hrs\n"
+            except Exception:
+                _pdf_kpi_text = ""
+        else:
+            _pdf_kpi_text = "Physical Availability (PA): N/A\nMechanical Availability (MA): N/A\nTotal Delay (hrs): N/A\nTotal Available Time: N/A"
         # -------------------------
         # END OF MOVED CODE
         # -------------------------
@@ -1357,7 +1360,7 @@ with tabs[0]:
         drill_df_base = filtered.copy()
 
     # -------------------------
-    # Drill-down table (unchanged except auto-fit & ordering)
+    # Drill-down table
     # -------------------------
     st.subheader("Drill-down data (filtered by selected category)")
 
@@ -1365,18 +1368,18 @@ with tabs[0]:
     if "PERIOD_MONTH" in details_df.columns:
         details_df["MONTH"] = details_df["PERIOD_MONTH"]
 
-    required_cols = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "EQ_DESC", "DELAY", "NOTE", "SUB_CATEGORY", "YEAR"]
+    required_cols = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "EQ_DESC", "DELAY", "NOTE", "PICA", "SUB_CATEGORY", "YEAR"] # ADDED 'PICA'
     for c in required_cols:
         if c not in details_df.columns:
             details_df[c] = ""
 
-    details_out = details_df[["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "EQ_DESC", "DELAY", "NOTE", "SUB_CATEGORY", "YEAR"]].copy()
+    details_out = details_df[["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "EQ_DESC", "DELAY", "NOTE", "PICA", "SUB_CATEGORY", "YEAR"]].copy() # ADDED 'PICA'
     details_out = details_out.rename(columns={"EQ_DESC": "Equipment Description"})
 
     if selected_category == "MAINTENANCE (ALL)":
-        ordered = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "SUB_CATEGORY", "Equipment Description", "DELAY", "NOTE"]
+        ordered = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "SUB_CATEGORY", "Equipment Description", "DELAY", "NOTE", "PICA"] # ADDED 'PICA'
     else:
-        ordered = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "Equipment Description", "DELAY", "NOTE"]
+        ordered = ["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "Equipment Description", "DELAY", "NOTE", "PICA"] # ADDED 'PICA'
 
     ordered = [c for c in ordered if c in details_out.columns]
     details_out["WEEK"] = pd.to_numeric(details_out["WEEK"], errors="coerce")

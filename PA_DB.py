@@ -767,149 +767,10 @@ MTBF_TOTAL_OP_HOURS = _mtbf_mttr_res.get("total_operational_hours") if isinstanc
 MTBF_TOTAL_MAINT_DELAY = _mtbf_mttr_res.get("total_maintenance_delay") if isinstance(_mtbf_mttr_res, dict) else None
 
 # -------------------------
-# Sidebar Filters & PDF export UI (unchanged placement)
+# Sidebar Filters
 # -------------------------
 st.sidebar.header("Filters & Options")
 st.sidebar.markdown("---")
-st.sidebar.subheader("Export report (PDF)")
-
-# Note: we will build the KPI text later when PA/MA exist; build a placeholder now
-_pdf_kpi_text = ""
-
-# -------------------------
-# PDF generation button (uses cached PNG bytes or will try to produce PNGs from available Plotly figs)
-# -------------------------
-# Ensure we have a pdf_keys list (if your code defines it earlier, this will not override it)
-pdf_keys = globals().get(
-    "pdf_keys",
-    [
-        "pdf_fig_trend",
-        "pdf_fig_pareto",
-        "pdf_fig_mttr_w",
-        "pdf_fig_mttr_m",
-        "pdf_fig_mtbf_w",
-        "pdf_fig_mtbf_m",
-    ],
-)
-
-if REPORTLAB_AVAILABLE:
-    # Generate PDF when user clicks button
-    if st.sidebar.button("Generate PDF"):
-        
-        # -------------------------
-        # KPI calculations and KPI text generation
-        # NOTE: This block is correctly placed AFTER the 'filtered' DataFrame is defined.
-        # -------------------------
-        if not filtered.empty:
-            total_delay = filtered["DELAY"].sum()
-            available_time = None
-            try:
-                if "AVAILABLE_TIME_MONTH" in filtered.columns and filtered["AVAILABLE_TIME_MONTH"].notna().any():
-                    available_time = filtered.groupby("PERIOD_MONTH", dropna=True)["AVAILABLE_TIME_MONTH"].max().dropna().sum()
-                elif "AVAILABLE_HOURS" in filtered.columns and filtered["AVAILABLE_HOURS"].notna().any():
-                    available_time = filtered.groupby("PERIOD_MONTH", dropna=True)["AVAILABLE_HOURS"].max().dropna().sum()
-                else:
-                    available_time = None
-            except Exception:
-                available_time = None
-            
-            PA = max(0, 1 - total_delay / available_time) if (available_time and available_time > 0) else None
-            maintenance_delay = filtered[filtered["CATEGORY"] == "Maintenance"]["DELAY"].sum() if "CATEGORY" in filtered.columns else 0
-            MA = max(0, 1 - maintenance_delay / available_time) if (available_time and available_time > 0) else None
-            
-            pa_target = filtered["PA_TARGET"].dropna().unique().tolist() if "PA_TARGET" in filtered.columns else []
-            ma_target = filtered["MA_TARGET"].dropna().unique().tolist() if "MA_TARGET" in filtered.columns else []
-            pa_target = pa_target[0] if pa_target else 0.9
-            ma_target = ma_target[0] if ma_target else 0.85
-            if isinstance(pa_target, (int, float)) and pa_target > 1:
-                pa_target = pa_target / 100.0
-            if isinstance(ma_target, (int, float)) and ma_target > 1:
-                ma_target = ma_target / 100.0
-        
-            # Build KPI header text for PDF
-            try:
-                _pdf_kpi_text = f"PA: {PA:.2%}\nMA: {MA:.2%}\nTotal Delay (selected): {total_delay:.2f} hrs\n"
-                if available_time:
-                    _pdf_kpi_text += f"Total Available Time (selected): {available_time:.2f} hrs\n"
-            except Exception:
-                _pdf_kpi_text = ""
-        else:
-            _pdf_kpi_text = "Physical Availability (PA): N/A\nMechanical Availability (MA): N/A\nTotal Delay (hrs): N/A\nTotal Available Time: N/A"
-        
-        figs_for_pdf = []
-
-        # 1) Collect PNG bytes already cached in session_state
-        for k in pdf_keys:
-            val = st.session_state.get(k, None)
-            if isinstance(val, (bytes, bytearray)):
-                # already PNG bytes
-                figs_for_pdf.append(val)
-            else:
-                # if a Plotly Figure object was stored there, convert it now
-                if val is not None and (hasattr(val, "to_image") or isinstance(val, go.Figure)):
-                    try:
-                        png = _fig_to_png_bytes(val)
-                        if png:
-                            figs_for_pdf.append(png)
-                            # cache converted PNG for subsequent clicks
-                            st.session_state[k] = png
-                    except Exception as e:
-                        # keep going if conversion fails
-                        # you can log to console for debugging: print("PNG convert fail", k, e)
-                        pass
-
-        # 2) Last-resort: if some PNGs missing but figure variables exist in globals()
-        # Try known fig variable names produced by the app (safe no-op if they don't exist)
-        known_fig_names = [
-            "fig_trend",
-            "fig_pareto",
-            "fig_mttr_w",
-            "fig_mttr_m",
-            "fig_mtbf_w",
-            "fig_mtbf_m",
-        ]
-        for name in known_fig_names:
-            # stop early if we already have many images (optional)
-            # (not strictly necessary — we just gather whatever's available)
-            if name in pdf_keys:
-                # prefer cached session_state entries first (we already tried above)
-                continue
-            fig_obj = globals().get(name)
-            if fig_obj is None:
-                continue
-            # convert figure -> png bytes
-            try:
-                png = _fig_to_png_bytes(fig_obj)
-                if png:
-                    # cache under a predictable key so future clicks are faster
-                    cache_key = "pdf_" + name
-                    st.session_state[cache_key] = png
-                    figs_for_pdf.append(png)
-            except Exception:
-                # ignore conversion errors and continue
-                pass
-
-        # 3) Create PDF bytes using the KPI header text we already prepare earlier (_pdf_kpi_text)
-        #    NOTE: _create_pdf_bytes(title, kpi_text, png_byte_list) is expected to exist
-        pdf_bytes = _create_pdf_bytes("Physical Availability Report", _pdf_kpi_text, figs_for_pdf)
-
-        if pdf_bytes:
-            st.session_state["_last_pdf"] = pdf_bytes
-            st.sidebar.success("PDF generated and ready to download.")
-        else:
-            # Helpful error hint for the user
-            st.sidebar.error("Failed to generate PDF. Check server logs and installed dependencies (ReportLab).")
-
-    # Download button if the PDF was previously generated
-    if st.session_state.get("_last_pdf") is not None:
-        st.sidebar.download_button(
-            "Download latest PDF",
-            data=st.session_state["_last_pdf"],
-            file_name="PA_report.pdf",
-            mime="application/pdf",
-        )
-else:
-    st.sidebar.info("PDF export unavailable: ReportLab not installed in this environment.")
 
 # -------------------------
 # Time granularity / Month / Year filters
@@ -976,6 +837,8 @@ else:
 
 # -------------------------
 # Apply selected filters to df (month & years)
+# NOTE: This section is now placed here, after all filters are defined, and before
+# any visualization code that uses 'filtered'. This solves the NameError.
 # -------------------------
 filtered = df.copy()
 if selected_month != "All" and selected_month != "":
@@ -983,6 +846,106 @@ if selected_month != "All" and selected_month != "":
 if selected_years:
     if "YEAR" in filtered.columns:
         filtered = filtered[filtered["YEAR"].isin(selected_years)].copy()
+
+# Add a PDF button and tabs to the main app body
+st.sidebar.markdown("---")
+st.sidebar.subheader("Export report (PDF)")
+if REPORTLAB_AVAILABLE:
+    if st.sidebar.button("Generate PDF"):
+        # -------------------------
+        # KPI calculations and KPI text generation
+        # NOTE: This block is correctly placed AFTER the 'filtered' DataFrame is defined.
+        # -------------------------
+        if not filtered.empty:
+            total_delay = filtered["DELAY"].sum()
+            available_time = None
+            try:
+                if "AVAILABLE_TIME_MONTH" in filtered.columns and filtered["AVAILABLE_TIME_MONTH"].notna().any():
+                    available_time = filtered.groupby("PERIOD_MONTH", dropna=True)["AVAILABLE_TIME_MONTH"].max().dropna().sum()
+                elif "AVAILABLE_HOURS" in filtered.columns and filtered["AVAILABLE_HOURS"].notna().any():
+                    available_time = filtered.groupby("PERIOD_MONTH", dropna=True)["AVAILABLE_HOURS"].max().dropna().sum()
+                else:
+                    available_time = None
+            except Exception:
+                available_time = None
+            
+            PA = max(0, 1 - total_delay / available_time) if (available_time and available_time > 0) else None
+            maintenance_delay = filtered[filtered["CATEGORY"] == "Maintenance"]["DELAY"].sum() if "CATEGORY" in filtered.columns else 0
+            MA = max(0, 1 - maintenance_delay / available_time) if (available_time and available_time > 0) else None
+            
+            pa_target = filtered["PA_TARGET"].dropna().unique().tolist() if "PA_TARGET" in filtered.columns else []
+            ma_target = filtered["MA_TARGET"].dropna().unique().tolist() if "MA_TARGET" in filtered.columns else []
+            pa_target = pa_target[0] if pa_target else 0.9
+            ma_target = ma_target[0] if ma_target else 0.85
+            if isinstance(pa_target, (int, float)) and pa_target > 1:
+                pa_target = pa_target / 100.0
+            if isinstance(ma_target, (int, float)) and ma_target > 1:
+                ma_target = ma_target / 100.0
+        
+            # Build KPI header text for PDF
+            try:
+                _pdf_kpi_text = f"PA: {PA:.2%}\nMA: {MA:.2%}\nTotal Delay (selected): {total_delay:.2f} hrs\n"
+                if available_time:
+                    _pdf_kpi_text += f"Total Available Time (selected): {available_time:.2f} hrs\n"
+            except Exception:
+                _pdf_kpi_text = ""
+        else:
+            _pdf_kpi_text = "Physical Availability (PA): N/A\nMechanical Availability (MA): N/A\nTotal Delay (hrs): N/A\nTotal Available Time: N/A"
+        
+        figs_for_pdf = []
+
+        # 1) Collect PNG bytes already cached in session_state
+        for k in pdf_keys:
+            val = st.session_state.get(k, None)
+            if isinstance(val, (bytes, bytearray)):
+                # already PNG bytes
+                figs_for_pdf.append(val)
+            else:
+                # if a Plotly Figure object was stored there, convert it now
+                if val is not None and (hasattr(val, "to_image") or isinstance(val, go.Figure)):
+                    # Use Matplotlib to create a PNG representation of the Plotly figure
+                    if k == 'pdf_fig_trend':
+                        png = _mpl_png_trend_from_df(globals().get("trend"), globals().get("x_field"), pa_col="PA_pct_rounded", delay_col="total_delay_hours_rounded", title="Trend: Total Delay Hours vs PA%")
+                    elif k == 'pdf_fig_pareto':
+                        png = _mpl_png_pareto_from_df(globals().get("pareto_df").rename(columns={globals().get("equipment_key"):"EQUIPMENT_DESC"}), equipment_key="EQUIPMENT_DESC", title="Top Delay by Equipment (Pareto) (fallback)")
+                    elif k in ['pdf_fig_mttr_w', 'pdf_fig_mttr_m', 'pdf_fig_mtbf_w', 'pdf_fig_mtbf_m']:
+                        df_to_use = globals().get(f"{k[8:-2]}_df_limited" if k.endswith('w') else f"{k[8:-2]}_df_local")
+                        if df_to_use is not None:
+                             x_col = "period_label" if k.endswith('w') else "PERIOD_MONTH"
+                             y_col = "MTTR_hours" if "mttr" in k else "MTBF_hours"
+                             color = "green" if "mttr" in k else "orange"
+                             title_str = f"{'MTTR' if 'mttr' in k else 'MTBF'} — {'Weekly' if k.endswith('w') else 'Monthly'}"
+                             png = _mpl_png_bar_from_df(df_to_use, x_col=x_col, y_col=y_col, title=title_str, color=color, xlabel="Week" if k.endswith('w') else "Month", ylabel=f"{'MTTR' if 'mttr' in k else 'MTBF'} (hrs)")
+                        else:
+                             png = None
+                    else:
+                        png = _fig_to_png_bytes(val)
+
+                    if png:
+                        figs_for_pdf.append(png)
+                        st.session_state[k] = png
+        
+        # 3) Create PDF bytes using the KPI header text we already prepare earlier (_pdf_kpi_text)
+        #    NOTE: _create_pdf_bytes(title, kpi_text, png_byte_list) is expected to exist
+        pdf_bytes = _create_pdf_bytes("Physical Availability Report", _pdf_kpi_text, figs_for_pdf)
+
+        if pdf_bytes:
+            st.session_state["_last_pdf"] = pdf_bytes
+            st.sidebar.success("PDF generated and ready to download.")
+        else:
+            # Helpful error hint for the user
+            st.sidebar.error("Failed to generate PDF. Check server logs and installed dependencies (ReportLab).")
+
+    # Download button if the PDF was previously generated
+    if st.session_state.get("_last_pdf") is not None:
+        st.sidebar.download_button(
+            "Download latest PDF",
+            data=st.session_state["_last_pdf"],
+            file_name="PA_report.pdf",
+            mime="application/pdf",
+        )
+else:
+    st.sidebar.info("PDF export unavailable: ReportLab not installed in this environment.")
 
 # create tabs (Main shown implicitly; Reliability as second tab)
 tabs = st.tabs(["Main Dashboard", "Reliability"])
@@ -992,10 +955,9 @@ tabs = st.tabs(["Main Dashboard", "Reliability"])
 # -------------------------
 with tabs[0]:
     # -------------------------
-    # KPI calculations (unchanged)
+    # KPI calculations for display on dashboard
     # -------------------------
     total_delay = filtered["DELAY"].sum()
-
     available_time = None
     try:
         if "AVAILABLE_TIME_MONTH" in filtered.columns and filtered["AVAILABLE_TIME_MONTH"].notna().any():
@@ -1006,11 +968,11 @@ with tabs[0]:
             available_time = None
     except Exception:
         available_time = None
-
+    
     PA = max(0, 1 - total_delay / available_time) if (available_time and available_time > 0) else None
     maintenance_delay = filtered[filtered["CATEGORY"] == "Maintenance"]["DELAY"].sum() if "CATEGORY" in filtered.columns else 0
     MA = max(0, 1 - maintenance_delay / available_time) if (available_time and available_time > 0) else None
-
+    
     pa_target = filtered["PA_TARGET"].dropna().unique().tolist() if "PA_TARGET" in filtered.columns else []
     ma_target = filtered["MA_TARGET"].dropna().unique().tolist() if "MA_TARGET" in filtered.columns else []
     pa_target = pa_target[0] if pa_target else 0.9
@@ -1020,16 +982,8 @@ with tabs[0]:
     if isinstance(ma_target, (int, float)) and ma_target > 1:
         ma_target = ma_target / 100.0
 
-    # Build KPI header text for PDF (now that PA/MA exist)
-    try:
-        _pdf_kpi_text = f"PA: {PA:.2%}\nMA: {MA:.2%}\nTotal Delay (selected): {total_delay:.2f} hrs\n"
-        if available_time:
-            _pdf_kpi_text += f"Total Available Time (selected): {available_time:.2f} hrs\n"
-    except Exception:
-        _pdf_kpi_text = ""
-
     # -------------------------
-    # YTD calculations (unchanged)
+    # YTD calculations
     # -------------------------
     ytd_PA = ytd_MA = None
     ytd_total_delay = None
@@ -1063,7 +1017,7 @@ with tabs[0]:
         ytd_total_delay = None
 
     # -------------------------
-    # Top Row: KPIs + Donuts (unchanged) with PNG caching + Matplotlib fallback
+    # Top Row: KPIs + Donuts with PNG caching + Matplotlib fallback
     # -------------------------
     kpi_col, donut1_col, donut2_col = st.columns([1,2,2])
     with kpi_col:

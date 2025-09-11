@@ -278,6 +278,9 @@ with logo_col:
 with title_col:
     st.title("Physical Availability Dashboard — Data Delay Time")
 
+# create tabs (Main shown implicitly; Reliability as second tab)
+tabs = st.tabs(["Main Dashboard", "Reliability"])
+
 # -------------------------
 # Config: source workbook URL (unchanged)
 # -------------------------
@@ -1277,9 +1280,6 @@ AgGrid(
 # -------------------------
 weekly_df_global = _mtbf_mttr_res.get("weekly_df") if isinstance(_mtbf_mttr_res, dict) else pd.DataFrame()
 monthly_df_global = _mtbf_mttr_res.get("monthly_df") if isinstance(_mtbf_mttr_res, dict) else pd.DataFrame()
-
-# create tabs (Main shown implicitly; Reliability as second tab)
-tabs = st.tabs(["Main Dashboard", "Reliability"])
 
 with tabs[1]:
     st.subheader("Reliability: MTBF & MTTR")

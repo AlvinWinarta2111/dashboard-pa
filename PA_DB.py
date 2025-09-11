@@ -40,6 +40,16 @@ except Exception:
 # Helper: convert Plotly figure to PNG bytes (try kaleido first)
 # -------------------------
 def _fig_to_png_bytes(fig):
+    """
+    Try to convert a Plotly figure to PNG bytes using fig.to_image.
+    If it fails (kaleido/Chrome issues), return None so we can fallback to Matplotlib.
+    """
+    try:
+        # primary attempt (kaleido engine)
+        img_bytes = fig.to_image(format="png", engine="kaleido")
+        if isinstance(img_bytes, (bytes, bytearray)):
+            return bytes(img_bytes)
+    except Exception:
         # Ignore and try default to_image (may also fail if kaleido is missing)
         try:
             img_bytes = fig.to_image(format="png")
@@ -260,9 +270,6 @@ pdf_keys = ['pdf_fig_trend','pdf_fig_pareto','pdf_fig_mttr_w','pdf_fig_mttr_m','
 for k in pdf_keys:
     if k not in st.session_state:
         st.session_state[k] = None
-# flag to request PDF generation after KPIs are computed
-if '_pdf_request' not in st.session_state:
-    st.session_state['_pdf_request'] = False
 if '_last_pdf' not in st.session_state:
     st.session_state['_last_pdf'] = None
 
@@ -534,55 +541,6 @@ def load_data_from_url():
 
     return df
 
-def compute_mtbf_mttr_from_url(url: str):
-    """
-    Load dataset from URL and compute MTBF/MTTR aggregated by WEEK and PERIOD_MONTH.
-
-    Returns
-    -------
-    mtbf_w : pd.DataFrame
-        Weekly MTBF values
-    mtbf_m : pd.DataFrame
-        Monthly MTBF values
-    mttr_w : pd.DataFrame
-        Weekly MTTR values
-    mttr_m : pd.DataFrame
-        Monthly MTTR values
-    """
-    df = load_data_from_url(url).copy()
-
-    # Ensure relevant fields exist
-    for col in ["WEEK", "PERIOD_MONTH", "MTBF", "MTTR"]:
-        if col not in df.columns:
-            df[col] = None
-
-    # Weekly aggregates
-    mtbf_w = (
-        df.groupby("WEEK", dropna=True)["MTBF"].mean().reset_index()
-        if "WEEK" in df.columns
-        else pd.DataFrame(columns=["WEEK", "MTBF"])
-    )
-    mttr_w = (
-        df.groupby("WEEK", dropna=True)["MTTR"].mean().reset_index()
-        if "WEEK" in df.columns
-        else pd.DataFrame(columns=["WEEK", "MTTR"])
-    )
-
-    # Monthly aggregates
-    mtbf_m = (
-        df.groupby("PERIOD_MONTH", dropna=True)["MTBF"].mean().reset_index()
-        if "PERIOD_MONTH" in df.columns
-        else pd.DataFrame(columns=["PERIOD_MONTH", "MTBF"])
-    )
-    mttr_m = (
-        df.groupby("PERIOD_MONTH", dropna=True)["MTTR"].mean().reset_index()
-        if "PERIOD_MONTH" in df.columns
-        else pd.DataFrame(columns=["PERIOD_MONTH", "MTTR"])
-    )
-
-    return mtbf_w, mtbf_m, mttr_w, mttr_m
-
-
 # -------------------------
 # Load data
 # -------------------------
@@ -846,10 +804,71 @@ pdf_keys = globals().get(
 if REPORTLAB_AVAILABLE:
     # Generate PDF when user clicks button
     if st.sidebar.button("Generate PDF"):
-        # Defer PDF creation until after KPI computations (to ensure KPI text is populated)
-        st.session_state["_pdf_request"] = True
-        st.sidebar.info("PDF requested — it will be generated with current KPIs and charts.")
+        figs_for_pdf = []
 
+        # 1) Collect PNG bytes already cached in session_state
+        for k in pdf_keys:
+            val = st.session_state.get(k, None)
+            if isinstance(val, (bytes, bytearray)):
+                # already PNG bytes
+                figs_for_pdf.append(val)
+            else:
+                # if a Plotly Figure object was stored there, convert it now
+                if val is not None and (hasattr(val, "to_image") or isinstance(val, go.Figure)):
+                    try:
+                        png = _fig_to_png_bytes(val)
+                        if png:
+                            figs_for_pdf.append(png)
+                            # cache converted PNG for subsequent clicks
+                            st.session_state[k] = png
+                    except Exception as e:
+                        # keep going if conversion fails
+                        # you can log to console for debugging: print("PNG convert fail", k, e)
+                        pass
+
+        # 2) Last-resort: if some PNGs missing but figure variables exist in globals()
+        # Try known fig variable names produced by the app (safe no-op if they don't exist)
+        known_fig_names = [
+            "fig_trend",
+            "fig_pareto",
+            "fig_mttr_w",
+            "fig_mttr_m",
+            "fig_mtbf_w",
+            "fig_mtbf_m",
+        ]
+        for name in known_fig_names:
+            # stop early if we already have many images (optional)
+            # (not strictly necessary — we just gather whatever's available)
+            if name in pdf_keys:
+                # prefer cached session_state entries first (we already tried above)
+                continue
+            fig_obj = globals().get(name)
+            if fig_obj is None:
+                continue
+            # convert figure -> png bytes
+            try:
+                png = _fig_to_png_bytes(fig_obj)
+                if png:
+                    # cache under a predictable key so future clicks are faster
+                    cache_key = "pdf_" + name
+                    st.session_state[cache_key] = png
+                    figs_for_pdf.append(png)
+            except Exception:
+                # ignore conversion errors and continue
+                pass
+
+        # 3) Create PDF bytes using the KPI header text we already prepare earlier (_pdf_kpi_text)
+        #    NOTE: _create_pdf_bytes(title, kpi_text, png_byte_list) is expected to exist
+        pdf_bytes = _create_pdf_bytes("Physical Availability Report", _pdf_kpi_text, figs_for_pdf)
+
+        if pdf_bytes:
+            st.session_state["_last_pdf"] = pdf_bytes
+            st.sidebar.success("PDF generated and ready to download.")
+        else:
+            # Helpful error hint for the user
+            st.sidebar.error("Failed to generate PDF. Check server logs and installed dependencies (ReportLab).")
+
+    # Download button if the PDF was previously generated
     if st.session_state.get("_last_pdf") is not None:
         st.sidebar.download_button(
             "Download latest PDF",
@@ -919,7 +938,7 @@ if "YEAR" in df.columns:
         all_years = []
 if all_years:
     # default select all (descending)
-    selected_years = st.sidebar.multiselect("Year (multi-select, descending)", options=list(map(int, all_years)), default=list(map(int, all_years)))
+    selected_years = st.sidebar.multiselect("Year (multi-select, descending)", options=all_years, default=all_years)
 else:
     selected_years = []
 
@@ -1506,40 +1525,6 @@ with tabs[1]:
                 st.info("No PERIOD_MONTH column in monthly reliability data.")
 
     st.markdown("---")
-
-# If a PDF was requested earlier, generate it now after all figures have been created and cached
-if st.session_state.get("_pdf_request"):
-    figs_for_pdf = []
-    # Use the pdf_keys to fetch cached PNGs; if missing, attempt to render from figure objects
-    for k in pdf_keys:
-        val = st.session_state.get(k, None)
-        if isinstance(val, (bytes, bytearray)):
-            figs_for_pdf.append(val)
-            continue
-        # try to map pdf_ key to a figure name, e.g. pdf_fig_trend -> fig_trend
-        fig_name = k.replace('pdf_', '')
-        fig_obj = globals().get(fig_name)
-        if fig_obj is None:
-            continue
-        try:
-            png = _fig_to_png_bytes(fig_obj)
-            if png:
-                st.session_state[k] = png
-                figs_for_pdf.append(png)
-        except Exception:
-            pass
-
-    # Now create the PDF using the KPI text populated earlier
-    pdf_bytes = None  # PDF created later after KPIs
-    st.session_state["_pdf_request"] = True
-    if pdf_bytes:
-        st.session_state["_last_pdf"] = pdf_bytes
-        st.sidebar.success("PDF generated and ready to download.")
-    else:
-        st.sidebar.error("Failed to generate PDF. Check server logs and installed dependencies (ReportLab).")
-    # Reset the request flag
-    st.session_state["_pdf_request"] = False
-
     st.caption("MTBF and MTTR shown is based on the period selected")
 
 # End of script

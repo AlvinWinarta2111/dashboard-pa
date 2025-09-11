@@ -175,47 +175,88 @@ def _mpl_png_bar_from_df(df, x_col, y_col, title="", color="blue", xlabel="", yl
         return None
 
 # -------------------------
-# Helper: create PDF bytes from title, kpi text, and list of PNG bytes
+# Helper: create PDF bytes from title, KPI text, and list of PNG bytes
 # -------------------------
+from reportlab.platypus import Table, TableStyle
+from reportlab.lib import colors
+
 def _create_pdf_bytes(title, kpi_text, png_byte_list):
     """
-    Build a simple PDF using ReportLab with the provided PNG byte sequences.
-    png_byte_list: list of PNG bytes (not Plotly figure objects).
+    Builds a simple PDF with:
+    - Title
+    - KPI table (parsed from kpi_text)
+    - List of PNG charts (smaller size)
     """
     if not REPORTLAB_AVAILABLE:
         return None
 
     elements = []
     styles = getSampleStyleSheet() if getSampleStyleSheet else None
-    if styles:
-        title_style = styles.get("Heading1")
-        normal_style = styles.get("Normal")
-    else:
-        title_style = None
-        normal_style = None
+    title_style = styles.get("Heading1") if styles else None
+    normal_style = styles.get("Normal") if styles else None
 
+    # --- Title
     if title_style:
         elements.append(Paragraph(title, title_style))
-    if normal_style and kpi_text:
-        elements.append(Spacer(1, 0.1 * inch))
-        elements.append(Paragraph(kpi_text.replace("\n", "<br/>"), normal_style))
-    elements.append(Spacer(1, 0.2 * inch))
+    else:
+        elements.append(Paragraph(title, normal_style or ""))
+    elements.append(Spacer(1, 0.08 * inch))
 
-    for png in png_byte_list or []:
+    # --- KPI table
+    try:
+        kpi_rows = []
+        if kpi_text and isinstance(kpi_text, str) and kpi_text.strip():
+            for line in str(kpi_text).splitlines():
+                parts = [p.strip() for p in line.split(":", 1)]
+                if len(parts) == 2:
+                    kpi_rows.append([parts[0], parts[1]])
+                elif line.strip():
+                    kpi_rows.append([line.strip(), ""])
+        if not kpi_rows:
+            kpi_rows = [["Physical Availability (PA)", "N/A"],
+                        ["Mechanical Availability (MA)", "N/A"],
+                        ["Total Delay (hrs)", "N/A"]]
+
+        data = [["Metric", "Value"]] + kpi_rows
+        tbl = Table(data, colWidths=[3.0 * inch, 3.0 * inch])
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4f81bd")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+        ]))
+        elements.append(tbl)
+        elements.append(Spacer(1, 0.15 * inch))
+    except Exception:
+        if normal_style and kpi_text:
+            elements.append(Paragraph(kpi_text.replace("\n", "<br/>"), normal_style))
+            elements.append(Spacer(1, 0.12 * inch))
+
+    # --- Charts (resize here)
+    img_width_inch = 5.0   # adjust this value to resize images
+    for png in (png_byte_list or []):
         if not png:
             continue
         try:
             bio = BytesIO(png)
-            rl_img = RLImage(bio, width=6.5 * inch)
+            rl_img = RLImage(bio, width=img_width_inch * inch)
             elements.append(rl_img)
-            elements.append(Spacer(1, 0.15 * inch))
+            elements.append(Spacer(1, 0.12 * inch))
         except Exception:
-            # skip if this image can't be embedded
             continue
 
+    # --- Build PDF
     try:
         buffer = BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=18)
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=A4,
+            rightMargin=30, leftMargin=30,
+            topMargin=30, bottomMargin=18
+        )
         doc.build(elements)
         buffer.seek(0)
         return buffer.read()
@@ -744,28 +785,97 @@ st.sidebar.subheader("Export report (PDF)")
 # Note: we will build the KPI text later when PA/MA exist; build a placeholder now
 _pdf_kpi_text = ""
 
-# PDF generation button (will use cached PNG bytes produced when charts render)
+# -------------------------
+# PDF generation button (uses cached PNG bytes or will try to produce PNGs from available Plotly figs)
+# -------------------------
+# Ensure we have a pdf_keys list (if your code defines it earlier, this will not override it)
+pdf_keys = globals().get(
+    "pdf_keys",
+    [
+        "pdf_fig_trend",
+        "pdf_fig_pareto",
+        "pdf_fig_mttr_w",
+        "pdf_fig_mttr_m",
+        "pdf_fig_mtbf_w",
+        "pdf_fig_mtbf_m",
+    ],
+)
+
 if REPORTLAB_AVAILABLE:
+    # Generate PDF when user clicks button
     if st.sidebar.button("Generate PDF"):
-        # Collect PNG bytes from session_state
         figs_for_pdf = []
-        for key in pdf_keys:
-            val = st.session_state.get(key)
-            if val:
+
+        # 1) Collect PNG bytes already cached in session_state
+        for k in pdf_keys:
+            val = st.session_state.get(k, None)
+            if isinstance(val, (bytes, bytearray)):
+                # already PNG bytes
                 figs_for_pdf.append(val)
-        # If trend / pareto / reliability PNGs are missing but underlying data is available,
-        # we will attempt to produce them via Matplotlib here before creating the PDF.
-        # (This is a last-resort attempt if the UI didn't cache images earlier.)
-        # NOTE: Keep this logic minimal to avoid changing other app behaviour.
-        # Create PDF bytes
+            else:
+                # if a Plotly Figure object was stored there, convert it now
+                if val is not None and (hasattr(val, "to_image") or isinstance(val, go.Figure)):
+                    try:
+                        png = _fig_to_png_bytes(val)
+                        if png:
+                            figs_for_pdf.append(png)
+                            # cache converted PNG for subsequent clicks
+                            st.session_state[k] = png
+                    except Exception as e:
+                        # keep going if conversion fails
+                        # you can log to console for debugging: print("PNG convert fail", k, e)
+                        pass
+
+        # 2) Last-resort: if some PNGs missing but figure variables exist in globals()
+        # Try known fig variable names produced by the app (safe no-op if they don't exist)
+        known_fig_names = [
+            "fig_trend",
+            "fig_pareto",
+            "fig_mttr_w",
+            "fig_mttr_m",
+            "fig_mtbf_w",
+            "fig_mtbf_m",
+        ]
+        for name in known_fig_names:
+            # stop early if we already have many images (optional)
+            # (not strictly necessary — we just gather whatever's available)
+            if name in pdf_keys:
+                # prefer cached session_state entries first (we already tried above)
+                continue
+            fig_obj = globals().get(name)
+            if fig_obj is None:
+                continue
+            # convert figure -> png bytes
+            try:
+                png = _fig_to_png_bytes(fig_obj)
+                if png:
+                    # cache under a predictable key so future clicks are faster
+                    cache_key = "pdf_" + name
+                    st.session_state[cache_key] = png
+                    figs_for_pdf.append(png)
+            except Exception:
+                # ignore conversion errors and continue
+                pass
+
+        # 3) Create PDF bytes using the KPI header text we already prepare earlier (_pdf_kpi_text)
+        #    NOTE: _create_pdf_bytes(title, kpi_text, png_byte_list) is expected to exist
         pdf_bytes = _create_pdf_bytes("Physical Availability Report", _pdf_kpi_text, figs_for_pdf)
+
         if pdf_bytes:
-            st.session_state['_last_pdf'] = pdf_bytes
+            st.session_state["_last_pdf"] = pdf_bytes
             st.sidebar.success("PDF generated and ready to download.")
         else:
-            st.sidebar.error("Failed to generate PDF. Check logs and dependencies.")
-    if st.session_state.get('_last_pdf') is not None:
-        st.sidebar.download_button("Download latest PDF", data=st.session_state['_last_pdf'], file_name="PA_report.pdf", mime="application/pdf")
+            # Helpful error hint for the user
+            st.sidebar.error("Failed to generate PDF. Check server logs and installed dependencies (ReportLab).")
+
+    # Download button if the PDF was previously generated
+    if st.session_state.get("_last_pdf") is not None:
+        st.sidebar.download_button(
+            "Download latest PDF",
+            data=st.session_state["_last_pdf"],
+            file_name="PA_report.pdf",
+            mime="application/pdf",
+        )
 else:
     st.sidebar.info("PDF export unavailable: ReportLab not installed in this environment.")
 

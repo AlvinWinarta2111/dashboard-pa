@@ -259,7 +259,7 @@ def _create_pdf_bytes(title, kpi_text, png_byte_list):
 # -------------------------
 # Prepare session_state holders for cached PNGs (used in PDF)
 # -------------------------
-pdf_keys = ['pdf_fig_trend','pdf_fig_pareto','pdf_fig_mttr_w','pdf_fig_mttr_m','pdf_fig_mtbf_w','pdf_fig_mtbf_m']
+pdf_keys = ['pdf_fig_trend','pdf_fig_pareto','pdf_fig_mttr_w','pdf_fig_mttr_m','pdf_fig_mtbf_w','pdf_fig_mtbf_m','pdf_tbl_mttr_equipment_w','pdf_tbl_mttr_equipment_m','pdf_tbl_mtbf_equipment_w','pdf_tbl_mtbf_equipment_m']
 for k in pdf_keys:
     if k not in st.session_state:
         st.session_state[k] = None
@@ -837,8 +837,6 @@ else:
 
 # -------------------------
 # Apply selected filters to df (month & years)
-# NOTE: This section is now placed here, after all filters are defined, and before
-# any visualization code that uses 'filtered'. This solves the NameError.
 # -------------------------
 filtered = df.copy()
 if selected_month != "All" and selected_month != "":
@@ -1205,7 +1203,7 @@ with tabs[0]:
         margin=dict(t=70)
     )
 
-    # Cache PNG: first try Plotly -> PNG; if not available, create Matplotlib fallback using the trend DataFrame
+    # Cache PNG: first try Plotly -> PNG, fallback to Matplotlib using the trend DataFrame
     png = _fig_to_png_bytes(fig_trend)
     if not png:
         # attempt Matplotlib fallback using the trend DataFrame

@@ -770,8 +770,14 @@ if REPORTLAB_AVAILABLE:
         # we will attempt to produce them via Matplotlib here before creating the PDF.
         # (This is a last-resort attempt if the UI didn't cache images earlier.)
         # NOTE: Keep this logic minimal to avoid changing other app behaviour.
-        # Create PDF bytes
-        pdf_bytes = _create_pdf_bytes("Physical Availability Report", _pdf_kpi_text, figs_for_pdf)
+        pdf_bytes = _create_pdf_bytes(
+            "Physical Availability Report",
+            PA,
+            MA,
+            total_delay,
+            available_time,
+            figs_for_pdf
+        )
         if pdf_bytes:
             st.session_state['_last_pdf'] = pdf_bytes
             st.sidebar.success("PDF generated and ready to download.")

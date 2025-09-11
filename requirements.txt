@@ -6,3 +6,4 @@ streamlit-aggrid
 html2image
 reportlab
 Pillow
+matplotlib

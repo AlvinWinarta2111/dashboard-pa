@@ -175,17 +175,14 @@ def _mpl_png_bar_from_df(df, x_col, y_col, title="", color="blue", xlabel="", yl
         return None
 
 # -------------------------
-# Helper: create PDF bytes from title, KPI text, and list of PNG bytes
 # -------------------------
-from reportlab.platypus import Table, TableStyle
-from reportlab.lib import colors
-
-def _create_pdf_bytes(title, kpi_text, png_byte_list):
+# Helper: create PDF bytes from title, KPI rows (list of lists), and list of PNG bytes
+# -------------------------
+def _create_pdf_bytes(title, kpi_rows, png_byte_list, image_width_inches=6.0):
     """
-    Builds a simple PDF with:
-    - Title
-    - KPI table (parsed from kpi_text)
-    - List of PNG charts (smaller size)
+    Build PDF using ReportLab. kpi_rows should be a list of rows like [["Metric","Value"], ...].
+    png_byte_list is a list of PNG bytes to embed (in order).
+    image_width_inches: width of images embedded in inches (float).
     """
     if not REPORTLAB_AVAILABLE:
         return None
@@ -195,73 +192,64 @@ def _create_pdf_bytes(title, kpi_text, png_byte_list):
     title_style = styles.get("Heading1") if styles else None
     normal_style = styles.get("Normal") if styles else None
 
-    # --- Title
+    # Title
     if title_style:
         elements.append(Paragraph(title, title_style))
     else:
-        elements.append(Paragraph(title, normal_style or ""))
-    elements.append(Spacer(1, 0.08 * inch))
+        elements.append(Paragraph(title, getSampleStyleSheet()["Heading1"]))
 
-    # --- KPI table
+    elements.append(Spacer(1, 0.1 * inch))
+
+    # KPI Table (if provided)
     try:
-        kpi_rows = []
-        if kpi_text and isinstance(kpi_text, str) and kpi_text.strip():
-            for line in str(kpi_text).splitlines():
-                parts = [p.strip() for p in line.split(":", 1)]
-                if len(parts) == 2:
-                    kpi_rows.append([parts[0], parts[1]])
-                elif line.strip():
-                    kpi_rows.append([line.strip(), ""])
-        if not kpi_rows:
-            kpi_rows = [["Physical Availability (PA)", "N/A"],
-                        ["Mechanical Availability (MA)", "N/A"],
-                        ["Total Delay (hrs)", "N/A"]]
-
-        data = [["Metric", "Value"]] + kpi_rows
-        tbl = Table(data, colWidths=[3.0 * inch, 3.0 * inch])
-        tbl.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4f81bd")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("ALIGN", (0, 0), (-1, -1), "LEFT"),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 9),
-            ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
-            ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-        ]))
-        elements.append(tbl)
-        elements.append(Spacer(1, 0.15 * inch))
+        if kpi_rows and isinstance(kpi_rows, list):
+            # Build ReportLab table
+            from reportlab.platypus import Table, TableStyle
+            from reportlab.lib import colors
+            table = Table(kpi_rows, colWidths=[3.0 * inch, 3.0 * inch])
+            table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4F81BD")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.black),
+            ]))
+            elements.append(table)
+            elements.append(Spacer(1, 0.2 * inch))
     except Exception:
-        if normal_style and kpi_text:
-            elements.append(Paragraph(kpi_text.replace("\n", "<br/>"), normal_style))
-            elements.append(Spacer(1, 0.12 * inch))
+        # If table building fails, add a simple paragraph
+        if normal_style:
+            elements.append(Paragraph("Key KPIs: (unable to format table)", normal_style))
+            elements.append(Spacer(1, 0.1 * inch))
 
-    # --- Charts (resize here)
-    img_width_inch = 5.0   # adjust this value to resize images
-    for png in (png_byte_list or []):
-        if not png:
-            continue
-        try:
-            bio = BytesIO(png)
-            rl_img = RLImage(bio, width=img_width_inch * inch)
-            elements.append(rl_img)
-            elements.append(Spacer(1, 0.12 * inch))
-        except Exception:
-            continue
+    # Images
+    try:
+        for png in png_byte_list or []:
+            if not png:
+                continue
+            try:
+                bio = BytesIO(png)
+                rl_img = RLImage(bio, width=(image_width_inches * inch))
+                elements.append(rl_img)
+                elements.append(Spacer(1, 0.12 * inch))
+            except Exception:
+                # skip if cannot be embedded
+                continue
+    except Exception:
+        pass
 
-    # --- Build PDF
+    # Build PDF
     try:
         buffer = BytesIO()
-        doc = SimpleDocTemplate(
-            buffer,
-            pagesize=A4,
-            rightMargin=30, leftMargin=30,
-            topMargin=30, bottomMargin=18
-        )
+        doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=18)
         doc.build(elements)
         buffer.seek(0)
         return buffer.read()
     except Exception:
         return None
+
 
 # -------------------------
 # Prepare session_state holders for cached PNGs (used in PDF)
@@ -776,108 +764,159 @@ MTBF_TOTAL_OP_HOURS = _mtbf_mttr_res.get("total_operational_hours") if isinstanc
 MTBF_TOTAL_MAINT_DELAY = _mtbf_mttr_res.get("total_maintenance_delay") if isinstance(_mtbf_mttr_res, dict) else None
 
 # -------------------------
-# Sidebar Filters & PDF export UI (unchanged placement)
+# Sidebar Filters & PDF export UI (minimal, sets request flag only)
 # -------------------------
 st.sidebar.header("Filters & Options")
+
+# PDF Export controls (keeps UI at the top but defers generation until later)
 st.sidebar.markdown("---")
 st.sidebar.subheader("Export report (PDF)")
 
-# Note: we will build the KPI text later when PA/MA exist; build a placeholder now
+# Prepare an empty KPI placeholder — the real KPI table is built later (after KPI calc)
 _pdf_kpi_text = ""
 
+# expose list of keys we will cache for PDF (consistent naming)
+pdf_keys = [
+    'pdf_fig_trend', 'pdf_fig_pareto',
+    'pdf_fig_mttr_w', 'pdf_fig_mttr_m',
+    'pdf_fig_mtbf_w', 'pdf_fig_mtbf_m'
+]
+
+# Initialize generation state in session if not present
+if '_generate_pdf_request' not in st.session_state:
+    st.session_state['_generate_pdf_request'] = False
+if '_last_pdf' not in st.session_state:
+    st.session_state['_last_pdf'] = None
+if '_pdf_debug' not in st.session_state:
+    st.session_state['_pdf_debug'] = {}
+
 # -------------------------
-# PDF generation button (uses cached PNG bytes or will try to produce PNGs from available Plotly figs)
+# PDF generation executor (runs AFTER KPIs + charts are computed and cached)
 # -------------------------
-# Ensure we have a pdf_keys list (if your code defines it earlier, this will not override it)
-pdf_keys = globals().get(
-    "pdf_keys",
-    [
-        "pdf_fig_trend",
-        "pdf_fig_pareto",
-        "pdf_fig_mttr_w",
-        "pdf_fig_mttr_m",
-        "pdf_fig_mtbf_w",
-        "pdf_fig_mtbf_m",
-    ],
-)
-
-if REPORTLAB_AVAILABLE:
-    # Generate PDF when user clicks button
-    if st.sidebar.button("Generate PDF"):
-        figs_for_pdf = []
-
-        # 1) Collect PNG bytes already cached in session_state
-        for k in pdf_keys:
-            val = st.session_state.get(k, None)
-            if isinstance(val, (bytes, bytearray)):
-                # already PNG bytes
-                figs_for_pdf.append(val)
-            else:
-                # if a Plotly Figure object was stored there, convert it now
-                if val is not None and (hasattr(val, "to_image") or isinstance(val, go.Figure)):
-                    try:
-                        png = _fig_to_png_bytes(val)
-                        if png:
-                            figs_for_pdf.append(png)
-                            # cache converted PNG for subsequent clicks
-                            st.session_state[k] = png
-                    except Exception as e:
-                        # keep going if conversion fails
-                        # you can log to console for debugging: print("PNG convert fail", k, e)
-                        pass
-
-        # 2) Last-resort: if some PNGs missing but figure variables exist in globals()
-        # Try known fig variable names produced by the app (safe no-op if they don't exist)
-        known_fig_names = [
-            "fig_trend",
-            "fig_pareto",
-            "fig_mttr_w",
-            "fig_mttr_m",
-            "fig_mtbf_w",
-            "fig_mtbf_m",
+if REPORTLAB_AVAILABLE and st.session_state.get('_generate_pdf_request'):
+    # Build KPI rows table from the current computed variables (guarantees values exist)
+    try:
+        kpi_rows = [
+            ["Metric", "Value"],
+            ["Physical Availability (PA)", f"{PA:.2%}" if PA is not None else "N/A"],
+            ["Mechanical Availability (MA)", f"{MA:.2%}" if MA is not None else "N/A"],
+            ["Total Delay (hrs)", f"{total_delay:.2f}"],
+            ["Available Time (hrs)", f"{available_time:.2f}" if available_time else "N/A"],
         ]
-        for name in known_fig_names:
-            # stop early if we already have many images (optional)
-            # (not strictly necessary — we just gather whatever's available)
-            if name in pdf_keys:
-                # prefer cached session_state entries first (we already tried above)
-                continue
-            fig_obj = globals().get(name)
-            if fig_obj is None:
-                continue
-            # convert figure -> png bytes
+    except Exception:
+        # If for any reason these are not available, set placeholders
+        kpi_rows = [
+            ["Metric", "Value"],
+            ["Physical Availability (PA)", "N/A"],
+            ["Mechanical Availability (MA)", "N/A"],
+            ["Total Delay (hrs)", "N/A"],
+            ["Available Time (hrs)", "N/A"],
+        ]
+
+    # Collect PNG bytes (from cached session_state keys)
+    collected_pngs = []
+    debug_info = {"collected_keys": {}, "fallback_used": []}
+
+    for key in pdf_keys:
+        png = st.session_state.get(key)
+        debug_info["collected_keys"][key] = bool(png)
+        if png:
+            collected_pngs.append(png)
+
+    # If some images are missing, attempt to generate fallbacks using underlying dataframes
+    # Trend: 'trend' df exists in local scope (if not, do nothing); Pareto: 'pareto_df'; reliability: weekly_df_global / monthly_df_global
+    try:
+        # trend fallback
+        if not any(k.endswith("trend") for k in debug_info["collected_keys"].keys()) and 'trend' in globals() and len(collected_pngs) < len(pdf_keys):
             try:
-                png = _fig_to_png_bytes(fig_obj)
-                if png:
-                    # cache under a predictable key so future clicks are faster
-                    cache_key = "pdf_" + name
-                    st.session_state[cache_key] = png
-                    figs_for_pdf.append(png)
+                # plot PA_pct if present, else total_delay
+                if "PA_pct_rounded" in trend.columns and trend["PA_pct_rounded"].notna().any():
+                    df_temp = trend.copy()
+                    df_temp["label"] = df_temp.index.astype(str)
+                    png = _mpl_bar_png(df_temp, "label", "PA_pct_rounded", title="PA% (trend)", xlabel="Period", ylabel="PA%")
+                    if png:
+                        collected_pngs.append(png)
+                        debug_info["fallback_used"].append("trend_mpl")
             except Exception:
-                # ignore conversion errors and continue
                 pass
 
-        # 3) Create PDF bytes using the KPI header text we already prepare earlier (_pdf_kpi_text)
-        #    NOTE: _create_pdf_bytes(title, kpi_text, png_byte_list) is expected to exist
-        pdf_bytes = _create_pdf_bytes("Physical Availability Report", _pdf_kpi_text, figs_for_pdf)
+        # pareto fallback
+        if ('pdf_fig_pareto' in pdf_keys) and ('pdf_fig_pareto' in debug_info["collected_keys"] and not debug_info["collected_keys"]['pdf_fig_pareto']):
+            try:
+                if 'pareto_df' in globals() and not pareto_df.empty:
+                    df_tmp = pareto_df.copy()
+                    df_tmp["label"] = df_tmp.iloc[:,0].astype(str)
+                    df_tmp = df_tmp.rename(columns={df_tmp.columns[1]: "value"})
+                    png = _mpl_bar_png(df_tmp, "label", "value", title="Top Delay by Equipment", xlabel="Equipment", ylabel="Hours")
+                    if png:
+                        collected_pngs.append(png)
+                        debug_info["fallback_used"].append("pareto_mpl")
+            except Exception:
+                pass
 
-        if pdf_bytes:
-            st.session_state["_last_pdf"] = pdf_bytes
-            st.sidebar.success("PDF generated and ready to download.")
-        else:
-            # Helpful error hint for the user
-            st.sidebar.error("Failed to generate PDF. Check server logs and installed dependencies (ReportLab).")
+        # reliability fallbacks (MTTR / MTBF weekly/monthly)
+        if 'weekly_df_global' in globals() and isinstance(weekly_df_global, pd.DataFrame) and not weekly_df_global.empty:
+            # try mttr weekly
+            try:
+                if not st.session_state.get('pdf_fig_mttr_w'):
+                    df_temp = weekly_df_global.sort_values("week_start") if "week_start" in weekly_df_global.columns else weekly_df_global
+                    if "MTTR_hours" in df_temp.columns:
+                        df_temp2 = df_temp.copy()
+                        df_temp2["label"] = df_temp2["period_label"].astype(str) if "period_label" in df_temp2.columns else df_temp2.index.astype(str)
+                        png = _mpl_bar_png(df_temp2, "label", "MTTR_hours", title="MTTR (weekly)", xlabel="Week", ylabel="MTTR (hrs)", figsize=(10,4))
+                        if png:
+                            collected_pngs.append(png)
+                            debug_info["fallback_used"].append("mttr_w_mpl")
+                if not st.session_state.get('pdf_fig_mtbf_w'):
+                    df_temp = weekly_df_global.sort_values("week_start") if "week_start" in weekly_df_global.columns else weekly_df_global
+                    if "MTBF_hours" in df_temp.columns:
+                        df_temp2 = df_temp.copy()
+                        df_temp2["label"] = df_temp2["period_label"].astype(str) if "period_label" in df_temp2.columns else df_temp2.index.astype(str)
+                        png = _mpl_bar_png(df_temp2, "label", "MTBF_hours", title="MTBF (weekly)", xlabel="Week", ylabel="MTBF (hrs)", figsize=(10,4))
+                        if png:
+                            collected_pngs.append(png)
+                            debug_info["fallback_used"].append("mtbf_w_mpl")
+            except Exception:
+                pass
 
-    # Download button if the PDF was previously generated
-    if st.session_state.get("_last_pdf") is not None:
-        st.sidebar.download_button(
-            "Download latest PDF",
-            data=st.session_state["_last_pdf"],
-            file_name="PA_report.pdf",
-            mime="application/pdf",
-        )
-else:
-    st.sidebar.info("PDF export unavailable: ReportLab not installed in this environment.")
+        if 'monthly_df_global' in globals() and isinstance(monthly_df_global, pd.DataFrame) and not monthly_df_global.empty:
+            # mttr monthly
+            try:
+                if not st.session_state.get('pdf_fig_mttr_m'):
+                    df_temp = monthly_df_global.sort_values("period_dt") if "period_dt" in monthly_df_global.columns else monthly_df_global
+                    if "MTTR_hours" in df_temp.columns:
+                        df_temp2 = df_temp.copy()
+                        df_temp2["label"] = df_temp2["PERIOD_MONTH"].astype(str)
+                        png = _mpl_bar_png(df_temp2, "label", "MTTR_hours", title="MTTR (monthly)", xlabel="Month", ylabel="MTTR (hrs)", figsize=(8,4))
+                        if png:
+                            collected_pngs.append(png)
+                            debug_info["fallback_used"].append("mttr_m_mpl")
+                if not st.session_state.get('pdf_fig_mtbf_m'):
+                    df_temp = monthly_df_global.sort_values("period_dt") if "period_dt" in monthly_df_global.columns else monthly_df_global
+                    if "MTBF_hours" in df_temp.columns:
+                        df_temp2 = df_temp.copy()
+                        df_temp2["label"] = df_temp2["PERIOD_MONTH"].astype(str)
+                        png = _mpl_bar_png(df_temp2, "label", "MTBF_hours", title="MTBF (monthly)", xlabel="Month", ylabel="MTBF (hrs)", figsize=(8,4))
+                        if png:
+                            collected_pngs.append(png)
+                            debug_info["fallback_used"].append("mtbf_m_mpl")
+            except Exception:
+                pass
+    except Exception:
+        # some fallback generation attempt failed; continue to generating PDF with whatever we have
+        pass
+
+    # Now create PDF bytes with KPI table and collected images (collected_pngs)
+    pdf_bytes = _create_pdf_bytes("Physical Availability Report", kpi_rows, collected_pngs)
+
+    if pdf_bytes:
+        st.session_state['_last_pdf'] = pdf_bytes
+        st.session_state['_generate_pdf_request'] = False
+        st.session_state['_pdf_debug'] = debug_info
+        st.sidebar.success("PDF generated and available for download.")
+    else:
+        st.session_state['_pdf_debug'] = {"error": "PDF creation returned None or failed."}
+        st.sidebar.error("PDF generation failed. See app logs or session_state['_pdf_debug'].")
 
 # -------------------------
 # Time granularity / Month / Year filters

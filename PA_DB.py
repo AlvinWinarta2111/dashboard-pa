@@ -1523,4 +1523,12 @@ with tabs[1]:
                 if not png:
                     png = _mpl_png_bar_from_df(monthly_df_local, x_col="PERIOD_MONTH", y_col="MTBF_hours", title="MTBF — Monthly", color="orange", xlabel="Month", ylabel="MTBF (hrs)")
                 if png:
-                    st.session_state['
+                    st.session_state['pdf_fig_mtbf_m'] = png
+                st.plotly_chart(fig_mtbf_m, use_container_width=True)
+            else:
+                st.info("No PERIOD_MONTH column in monthly reliability data.")
+
+    st.markdown("---")
+    st.caption("MTBF and MTTR shown is based on the period selected")
+# END: RELIABILITY TAB CONTENT
+# -------------------------

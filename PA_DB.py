@@ -879,8 +879,6 @@ if REPORTLAB_AVAILABLE:
 else:
     st.sidebar.info("PDF export unavailable: ReportLab not installed in this environment.")
 
-with tabs[0]:
-    st.subheader("Reliability: MTBF & MTTR")
 # -------------------------
 # Time granularity / Month / Year filters
 # -------------------------

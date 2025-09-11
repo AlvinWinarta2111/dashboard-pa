@@ -37,26 +37,20 @@ except Exception:
     REPORTLAB_AVAILABLE = False
 
 # -------------------------
-# Helper: convert Plotly figure to PNG bytes (try kaleido first)
+# Helper: convert Plotly figure to PNG bytes (fallback only)
 # -------------------------
 def _fig_to_png_bytes(fig):
     """
     Try to convert a Plotly figure to PNG bytes using fig.to_image.
-    If it fails (kaleido/Chrome issues), return None so we can fallback to Matplotlib.
+    If it fails, return None. This function is no longer used for Kaleido.
+    It's kept for any other potential Plotly image export.
     """
     try:
-        # primary attempt (kaleido engine)
-        img_bytes = fig.to_image(format="png", engine="kaleido")
+        img_bytes = fig.to_image(format="png")
         if isinstance(img_bytes, (bytes, bytearray)):
             return bytes(img_bytes)
     except Exception:
-        # Ignore and try default to_image (may also fail if kaleido is missing)
-        try:
-            img_bytes = fig.to_image(format="png")
-            if isinstance(img_bytes, (bytes, bytearray)):
-                return bytes(img_bytes)
-        except Exception:
-            return None
+        return None
     return None
 
 # -------------------------
@@ -169,7 +163,7 @@ def _mpl_png_bar_from_df(df, x_col, y_col, title="", color="blue", xlabel="", yl
         return _mpl_fig_to_png_bytes(fig)
     except Exception:
         try:
-            plt.close("all")
+            plt.close(fig)
         except Exception:
             pass
         return None
@@ -805,6 +799,7 @@ if REPORTLAB_AVAILABLE:
         
         # -------------------------
         # KPI calculations and KPI text generation
+        # NOTE: This block is correctly placed AFTER the 'filtered' DataFrame is defined.
         # -------------------------
         if not filtered.empty:
             total_delay = filtered["DELAY"].sum()
@@ -853,48 +848,28 @@ if REPORTLAB_AVAILABLE:
             else:
                 # if a Plotly Figure object was stored there, convert it now
                 if val is not None and (hasattr(val, "to_image") or isinstance(val, go.Figure)):
-                    try:
+                    # Use Matplotlib to create a PNG representation of the Plotly figure
+                    if k == 'pdf_fig_trend':
+                        png = _mpl_png_trend_from_df(globals().get("trend"), globals().get("x_field"), pa_col="PA_pct_rounded", delay_col="total_delay_hours_rounded", title="Trend: Total Delay Hours vs PA%")
+                    elif k == 'pdf_fig_pareto':
+                        png = _mpl_png_pareto_from_df(globals().get("pareto_df").rename(columns={globals().get("equipment_key"):"EQUIPMENT_DESC"}), equipment_key="EQUIPMENT_DESC", title="Top Delay by Equipment (Pareto) (fallback)")
+                    elif k in ['pdf_fig_mttr_w', 'pdf_fig_mttr_m', 'pdf_fig_mtbf_w', 'pdf_fig_mtbf_m']:
+                        df_to_use = globals().get(f"{k[8:-2]}_df_limited" if k.endswith('w') else f"{k[8:-2]}_df_local")
+                        if df_to_use is not None:
+                             x_col = "period_label" if k.endswith('w') else "PERIOD_MONTH"
+                             y_col = "MTTR_hours" if "mttr" in k else "MTBF_hours"
+                             color = "green" if "mttr" in k else "orange"
+                             title_str = f"{'MTTR' if 'mttr' in k else 'MTBF'} — {'Weekly' if k.endswith('w') else 'Monthly'}"
+                             png = _mpl_png_bar_from_df(df_to_use, x_col=x_col, y_col=y_col, title=title_str, color=color, xlabel="Week" if k.endswith('w') else "Month", ylabel=f"{'MTTR' if 'mttr' in k else 'MTBF'} (hrs)")
+                        else:
+                             png = None
+                    else:
                         png = _fig_to_png_bytes(val)
-                        if png:
-                            figs_for_pdf.append(png)
-                            # cache converted PNG for subsequent clicks
-                            st.session_state[k] = png
-                    except Exception as e:
-                        # keep going if conversion fails
-                        # you can log to console for debugging: print("PNG convert fail", k, e)
-                        pass
 
-        # 2) Last-resort: if some PNGs missing but figure variables exist in globals()
-        # Try known fig variable names produced by the app (safe no-op if they's don't exist)
-        known_fig_names = [
-            "fig_trend",
-            "fig_pareto",
-            "fig_mttr_w",
-            "fig_mttr_m",
-            "fig_mtbf_w",
-            "fig_mtbf_m",
-        ]
-        for name in known_fig_names:
-            # stop early if we already have many images (optional)
-            # (not strictly necessary — we just gather whatever's available)
-            if name in pdf_keys:
-                # prefer cached session_state entries first (we already tried above)
-                continue
-            fig_obj = globals().get(name)
-            if fig_obj is None:
-                continue
-            # convert figure -> png bytes
-            try:
-                png = _fig_to_png_bytes(fig_obj)
-                if png:
-                    # cache under a predictable key so future clicks are faster
-                    cache_key = "pdf_" + name
-                    st.session_state[cache_key] = png
-                    figs_for_pdf.append(png)
-            except Exception:
-                # ignore conversion errors and continue
-                pass
-
+                    if png:
+                        figs_for_pdf.append(png)
+                        st.session_state[k] = png
+        
         # 3) Create PDF bytes using the KPI header text we already prepare earlier (_pdf_kpi_text)
         #    NOTE: _create_pdf_bytes(title, kpi_text, png_byte_list) is expected to exist
         pdf_bytes = _create_pdf_bytes("Physical Availability Report", _pdf_kpi_text, figs_for_pdf)
@@ -918,7 +893,7 @@ else:
     st.sidebar.info("PDF export unavailable: ReportLab not installed in this environment.")
 
 # -------------------------
-# Time granularity / Month / Year filters (moved here)
+# Sidebar Filters
 # -------------------------
 granularity = st.sidebar.selectbox("Time granularity", options=["WEEK", "PERIOD_MONTH"], index=1)
 
@@ -982,7 +957,8 @@ else:
 
 # -------------------------
 # Apply selected filters to df (month & years)
-# NOTE: This section is moved to a global scope to ensure 'filtered' is always defined.
+# This section is now placed here, after all filters are defined, and before
+# any visualization code that uses 'filtered'. This solves the NameError.
 # -------------------------
 filtered = df.copy()
 if selected_month != "All" and selected_month != "":
@@ -1258,14 +1234,8 @@ with tabs[0]:
         margin=dict(t=70)
     )
 
-    # Cache PNG: first try Plotly -> PNG; if not available, create Matplotlib fallback using the trend DataFrame
-    png = _fig_to_png_bytes(fig_trend)
-    if not png:
-        # attempt Matplotlib fallback using the trend DataFrame
-        try:
-            png = _mpl_png_trend_from_df(trend, x_field=x_field, pa_col="PA_pct_rounded", delay_col="total_delay_hours_rounded", title="Trend: Total Delay Hours vs PA%")
-        except Exception:
-            png = None
+    # Cache PNG: now using Matplotlib
+    png = _mpl_png_trend_from_df(trend, x_field=x_field, pa_col="PA_pct_rounded", delay_col="total_delay_hours_rounded", title="Trend: Total Delay Hours vs PA%")
     if png:
         st.session_state['pdf_fig_trend'] = png
     st.plotly_chart(fig_trend, use_container_width=True)
@@ -1316,13 +1286,8 @@ with tabs[0]:
     fig_pareto.update_yaxes(title_text="Cumulative %", tickformat=".2%", range=[0, 1], secondary_y=True)
     fig_pareto.update_yaxes(title_text="Delay Hours", secondary_y=False)
 
-    # Cache PNG for Pareto (Plotly -> PNG first; fallback to Matplotlib)
-    png = _fig_to_png_bytes(fig_pareto)
-    if not png:
-        try:
-            png = _mpl_png_pareto_from_df(pareto_df.rename(columns={equipment_key:"EQUIPMENT_DESC"}), equipment_key="EQUIPMENT_DESC", title="Top Delay by Equipment (Pareto) (fallback)")
-        except Exception:
-            png = None
+    # Cache PNG for Pareto (Matplotlib now primary)
+    png = _mpl_png_pareto_from_df(pareto_df.rename(columns={equipment_key:"EQUIPMENT_DESC"}), equipment_key="EQUIPMENT_DESC", title="Top Delay by Equipment (Pareto) (fallback)")
     if png:
         st.session_state['pdf_fig_pareto'] = png
     st.plotly_chart(fig_pareto, use_container_width=True)
@@ -1476,9 +1441,7 @@ with tabs[1]:
                 fig_mttr_w.add_trace(go.Bar(x=weekly_df_limited["period_label"], y=weekly_df_limited["MTTR_hours"].round(2), name="MTTR (hrs)", marker=dict(color="green")))
                 fig_mttr_w.update_layout(xaxis_title="Week", yaxis_title="MTTR (hours)", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02), margin=dict(t=60))
                 # cache PNG: try Plotly -> PNG, fallback to Matplotlib using weekly_df_limited
-                png = _fig_to_png_bytes(fig_mttr_w)
-                if not png:
-                    png = _mpl_png_bar_from_df(weekly_df_limited, x_col="period_label", y_col="MTTR_hours", title="MTTR — Weekly", color="green", xlabel="Week", ylabel="MTTR (hrs)")
+                png = _mpl_png_bar_from_df(weekly_df_limited, x_col="period_label", y_col="MTTR_hours", title="MTTR — Weekly", color="green", xlabel="Week", ylabel="MTTR (hrs)")
                 if png:
                     st.session_state['pdf_fig_mttr_w'] = png
                 st.plotly_chart(fig_mttr_w, use_container_width=True)
@@ -1495,9 +1458,7 @@ with tabs[1]:
                 fig_mttr_m = go.Figure()
                 fig_mttr_m.add_trace(go.Bar(x=monthly_df_local["PERIOD_MONTH"], y=monthly_df_local["MTTR_hours"].round(2), name="MTTR (hrs)", marker=dict(color="green")))
                 fig_mttr_m.update_layout(xaxis_title="Month", yaxis_title="MTTR (hours)", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02), margin=dict(t=60))
-                png = _fig_to_png_bytes(fig_mttr_m)
-                if not png:
-                    png = _mpl_png_bar_from_df(monthly_df_local, x_col="PERIOD_MONTH", y_col="MTTR_hours", title="MTTR — Monthly", color="green", xlabel="Month", ylabel="MTTR (hrs)")
+                png = _mpl_png_bar_from_df(monthly_df_local, x_col="PERIOD_MONTH", y_col="MTTR_hours", title="MTTR — Monthly", color="green", xlabel="Month", ylabel="MTTR (hrs)")
                 if png:
                     st.session_state['pdf_fig_mttr_m'] = png
                 st.plotly_chart(fig_mttr_m, use_container_width=True)
@@ -1530,9 +1491,7 @@ with tabs[1]:
                 fig_mtbf_w = go.Figure()
                 fig_mtbf_w.add_trace(go.Bar(x=weekly_df_limited["period_label"], y=weekly_df_limited["MTBF_hours"].round(2), name="MTBF (hrs)", marker=dict(color="orange")))
                 fig_mtbf_w.update_layout(xaxis_title="Week", yaxis_title="MTBF (hours)", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02), margin=dict(t=60))
-                png = _fig_to_png_bytes(fig_mtbf_w)
-                if not png:
-                    png = _mpl_png_bar_from_df(weekly_df_limited, x_col="period_label", y_col="MTBF_hours", title="MTBF — Weekly", color="orange", xlabel="Week", ylabel="MTBF (hrs)")
+                png = _mpl_png_bar_from_df(weekly_df_limited, x_col="period_label", y_col="MTBF_hours", title="MTBF — Weekly", color="orange", xlabel="Week", ylabel="MTBF (hrs)")
                 if png:
                     st.session_state['pdf_fig_mtbf_w'] = png
                 st.plotly_chart(fig_mtbf_w, use_container_width=True)
@@ -1549,9 +1508,7 @@ with tabs[1]:
                 fig_mtbf_m = go.Figure()
                 fig_mtbf_m.add_trace(go.Bar(x=monthly_df_local["PERIOD_MONTH"], y=monthly_df_local["MTBF_hours"].round(2), name="MTBF (hrs)", marker=dict(color="orange")))
                 fig_mtbf_m.update_layout(xaxis_title="Month", yaxis_title="MTBF (hours)", legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02), margin=dict(t=60))
-                png = _fig_to_png_bytes(fig_mtbf_m)
-                if not png:
-                    png = _mpl_png_bar_from_df(monthly_df_local, x_col="PERIOD_MONTH", y_col="MTBF_hours", title="MTBF — Monthly", color="orange", xlabel="Month", ylabel="MTTR (hrs)")
+                png = _mpl_png_bar_from_df(monthly_df_local, x_col="PERIOD_MONTH", y_col="MTBF_hours", title="MTBF — Monthly", color="orange", xlabel="Month", ylabel="MTTR (hrs)")
                 if png:
                     st.session_state['pdf_fig_mtbf_m'] = png
                 st.plotly_chart(fig_mtbf_m, use_container_width=True)

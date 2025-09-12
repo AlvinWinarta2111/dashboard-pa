@@ -336,7 +336,7 @@ RAW_URL = "https://raw.githubusercontent.com/AlvinWinarta2111/dashboard-pa/refs/
 # -------------------------
 # Load + Clean function
 # -------------------------
-@st.cache_data(ttl=600)
+@st.cache_data
 def load_data_from_url():
     try:
         raw = pd.read_excel(RAW_URL, sheet_name="Data Delay Time", header=None)
@@ -559,7 +559,7 @@ if df is None:
 # NEW: compute MTBF & MTTR from "Data Operational" sheet (COUNT = total rows)
 # Fixed grouping key bug and improved parsing
 # -------------------------
-@st.cache_data(ttl=600)
+@st.cache_data
 def compute_mtbf_mttr_from_url(raw_url):
     """
     Reads the Data Operational sheet and computes weekly/monthly MTBF & MTTR using simple COUNT logic.

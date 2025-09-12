@@ -1522,54 +1522,42 @@ with tabs[1]:
                 st.info("No PERIOD_MONTH column in monthly reliability data.")
 
     st.markdown("---")
-    st.caption("MTBF and MTTR shown is based on the period selected")
-
-    # --- SECTION UPDATED AS PER YOUR REQUEST ---
-    # This entire block is new and replaces the previous version.
-
+    
     # -------------------------
-    # New table: MTTR/MTBF per equipment
+    # MTTR & MTBF per Equipment Table
     # -------------------------
     st.subheader("MTTR & MTBF per Equipment")
     st.markdown(f"View by: **{granularity.replace('_', ' ').title()}** (change in sidebar)")
 
-    # Load data from both sheets
-    df_delay_time = filtered.copy() # Use the globally filtered dataframe
+    df_delay_time = filtered.copy()
     df_op = RAW_DF_OP.copy() if isinstance(RAW_DF_OP, pd.DataFrame) else pd.DataFrame()
 
     if df_op.empty or df_delay_time.empty:
         st.info("Data for calculating per-equipment reliability metrics is unavailable.")
     else:
-        # 1. Filter for maintenance delays only
         df_maint_delays = df_delay_time[df_delay_time['CATEGORY'] == 'Maintenance'].copy()
-        
-        # Filter out rows where EQUIPMENT_DESC is a hyphen, empty, or None
         df_maint_delays = df_maint_delays[~df_maint_delays['EQUIPMENT_DESC'].str.strip().isin(['-', '---', ''])]
 
-        # 2. Aggregate maintenance delays per equipment, per week
         delay_agg = df_maint_delays.groupby(['YEAR', 'WEEK', 'PERIOD_MONTH', 'EQUIPMENT_DESC']).agg(
             total_maint_delay_hours=('DELAY', 'sum'),
             maint_event_count=('DELAY', 'size')
         ).reset_index()
 
-        # 3. Aggregate operational hours per week (plant-wide metric)
         op_agg = df_op.groupby(['YEAR', 'WEEK']).agg(
             total_operational_hours=('_op_hours_dec', 'sum')
         ).reset_index()
 
-        # 4. Merge data (This performs the alignment/cross-check)
-        merged_data = pd.merge(delay_agg, op_agg, on=['YEAR', 'WEEK'], how='left')
-        
-        # --- NEW: Granularity-based Aggregation ---
+        # --- LOGIC CHANGE ---
+        # CHANGED: Use 'inner' merge to only include weeks present in BOTH datasets.
+        merged_data = pd.merge(delay_agg, op_agg, on=['YEAR', 'WEEK'], how='inner')
+
         if granularity == 'PERIOD_MONTH':
-            # Aggregate the weekly data up to the monthly level
             monthly_agg = merged_data.groupby(['YEAR', 'PERIOD_MONTH', 'EQUIPMENT_DESC']).agg(
                 total_maint_delay_hours=('total_maint_delay_hours', 'sum'),
                 maint_event_count=('maint_event_count', 'sum'),
                 total_operational_hours=('total_operational_hours', 'sum')
             ).reset_index()
 
-            # Calculate MTTR and MTBF from the monthly sums
             monthly_agg['MTTR'] = monthly_agg.apply(
                 lambda row: row['total_maint_delay_hours'] / row['maint_event_count'] if row['maint_event_count'] > 0 else 0, axis=1
             )
@@ -1577,14 +1565,17 @@ with tabs[1]:
                 lambda row: row['total_operational_hours'] / row['maint_event_count'] if row['maint_event_count'] > 0 else 0, axis=1
             )
             
-            display_df = monthly_agg[['YEAR', 'PERIOD_MONTH', 'EQUIPMENT_DESC', 'MTTR', 'MTBF']].copy()
-            display_df.rename(columns={'PERIOD_MONTH': 'MONTH', 'EQUIPMENT_DESC': 'EQUIPMENT'}, inplace=True)
-            # Sort by a datetime version of the month for correct chronological order
-            display_df['month_dt'] = pd.to_datetime(display_df['MONTH'], format='%b %Y', errors='coerce')
-            display_df = display_df.sort_values(by=['month_dt'], ascending=False).drop(columns='month_dt')
+            # CHANGED: Logic to create separate YEAR and MONTH columns
+            display_df = monthly_agg.copy()
+            display_df['MONTH'] = pd.to_datetime(display_df['PERIOD_MONTH'], format='%b %Y', errors='coerce').dt.strftime('%b')
+            display_df = display_df[['YEAR', 'MONTH', 'EQUIPMENT_DESC', 'MTTR', 'MTBF']]
+            display_df.rename(columns={'EQUIPMENT_DESC': 'EQUIPMENT'}, inplace=True)
+            
+            # Sort by year, then by the actual date of the month
+            sort_key = pd.to_datetime(monthly_agg['PERIOD_MONTH'], format='%b %Y', errors='coerce')
+            display_df = display_df.iloc[sort_key.argsort()[::-1]]
 
         else: # Default to WEEK view
-            # Calculate MTTR and MTBF for each weekly equipment group
             merged_data['MTTR'] = merged_data.apply(
                 lambda row: row['total_maint_delay_hours'] / row['maint_event_count'] if row['maint_event_count'] > 0 else 0, axis=1
             )
@@ -1592,23 +1583,21 @@ with tabs[1]:
                 lambda row: row['total_operational_hours'] / row['maint_event_count'] if row['maint_event_count'] > 0 else 0, axis=1
             )
             
-            display_df = merged_data[['YEAR', 'PERIOD_MONTH', 'WEEK', 'EQUIPMENT_DESC', 'MTTR', 'MTBF']].copy()
-            display_df.rename(columns={'PERIOD_MONTH': 'MONTH', 'EQUIPMENT_DESC': 'EQUIPMENT'}, inplace=True)
+            # CHANGED: Logic to create separate YEAR and MONTH columns
+            display_df = merged_data.copy()
+            display_df['MONTH'] = pd.to_datetime(display_df['PERIOD_MONTH'], format='%b %Y', errors='coerce').dt.strftime('%b')
+            display_df = display_df[['YEAR', 'MONTH', 'WEEK', 'EQUIPMENT_DESC', 'MTTR', 'MTBF']]
+            display_df.rename(columns={'EQUIPMENT_DESC': 'EQUIPMENT'}, inplace=True)
             display_df = display_df.sort_values(by=['YEAR', 'WEEK'], ascending=[False, False])
 
-
-        # --- Common Formatting and Display for both views ---
         display_df['MTTR'] = display_df['MTTR'].round(2)
         display_df['MTBF'] = display_df['MTBF'].round(2)
         display_df = display_df.reset_index(drop=True)
 
-        # Display in AgGrid
         if not display_df.empty:
             gb = GridOptionsBuilder.from_dataframe(display_df)
             gb.configure_grid_options(pagination=False) 
-            gb.configure_default_column(
-                editable=False, sortable=True, filter=True, resizable=True
-            )
+            gb.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
             grid_options = gb.build()
 
             AgGrid(
@@ -1617,12 +1606,10 @@ with tabs[1]:
                 height=500,
                 fit_columns_on_grid_load=True,
                 theme="balham",
-                key=f'aggrid_{granularity}' # Add a dynamic key to force rerender on selection change
+                key=f'aggrid_{granularity}'
             )
         else:
-            st.info("No per-equipment reliability data available for the selected filters.")
-
-    # --- END OF UPDATED SECTION ---
+            st.info("No matching reliability data found for the selected filters. Ensure both 'Data Delay Time' and 'Data Operational' have entries for the same weeks.")
 
 # END: RELIABILITY TAB CONTENT
 # -------------------------

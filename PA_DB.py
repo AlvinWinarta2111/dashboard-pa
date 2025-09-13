@@ -804,7 +804,6 @@ with tabs[0]:
     kpi_col, donut1_col, donut2_col = st.columns([1,2,2])
     with kpi_col:
         st.subheader("Key KPIs")
-        # (This section remains unchanged, as it just displays the calculated values)
         min_caption, max_caption = None, None
         if "PERIOD_MONTH" in filtered.columns and not filtered["PERIOD_MONTH"].dropna().empty:
             parsed = pd.to_datetime(filtered["PERIOD_MONTH"].dropna().unique(), format="%b %Y", errors="coerce")
@@ -833,7 +832,6 @@ with tabs[0]:
                 donut_data["DELAY"] = donut_data["DELAY"].round(2)
                 donut_fig = go.Figure(data=[go.Pie(labels=donut_data["CATEGORY"], values=donut_data["DELAY"], hole=0.4, textinfo="label+percent", hovertemplate="%{label}: %{value:.2f} hrs<extra></extra>")])
                 donut_fig.update_layout(margin=dict(t=20,b=20,l=20,r=20))
-                # Store the Plotly figure in session state for potential PDF rendering
                 st.session_state['pdf_fig_donut1'] = donut_fig
                 st.plotly_chart(donut_fig, use_container_width=True)
             else:
@@ -913,6 +911,8 @@ with tabs[0]:
             trend.at[idx, "PA_pct"] = (avail - maint_delay) / avail
 
     # Data formatting and plotting (remains the same)
+    # FIX: Convert PA_pct to numeric before rounding to avoid TypeError
+    trend["PA_pct"] = pd.to_numeric(trend["PA_pct"], errors="coerce")
     trend["PA_pct_rounded"] = trend["PA_pct"].round(4)
     trend["total_delay_hours_rounded"] = trend["total_delay_hours"].round(2)
 
@@ -928,6 +928,7 @@ with tabs[0]:
     st.plotly_chart(fig_trend, use_container_width=True)
 
     st.markdown("---")
+    
     # Pareto by Equipment
     st.subheader("Top Delay by Equipment (Pareto)")
 

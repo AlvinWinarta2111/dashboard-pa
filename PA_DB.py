@@ -774,9 +774,11 @@ st.sidebar.header("Filters & Options")
 st.sidebar.markdown("---")
 
 # -------------------------
-# Time granularity / Month / Year filters
+# Time granularity / Month / Year filters (LABELS UPDATED)
 # -------------------------
-granularity = st.sidebar.selectbox("Time granularity", options=["WEEK", "PERIOD_MONTH"], index=1)
+granularity_map = {"Weekly": "WEEK", "Monthly": "PERIOD_MONTH"}
+granularity_display = st.sidebar.selectbox("Time granularity", options=["Monthly", "Weekly"], index=0)
+granularity = granularity_map[granularity_display] # Map display name to internal column name
 
 # Build month list from PERIOD_MONTH chronologically
 months_available = []
@@ -837,27 +839,42 @@ else:
     selected_years = []
 
 # -------------------------
-# Apply selected filters to both dataframes
+# Apply selected filters to both dataframes (LOGIC FIXED)
 # -------------------------
 filtered = df.copy()
-if selected_month != "All" and selected_month != "":
-    filtered = filtered[filtered["PERIOD_MONTH"] == selected_month]
+filtered_op = RAW_DF_OP.copy() if not RAW_DF_OP.empty else pd.DataFrame()
+
+# Year filter (applied first)
 if selected_years:
     if "YEAR" in filtered.columns:
         filtered = filtered[filtered["YEAR"].isin(selected_years)].copy()
-
-# ** NEW ** : Apply same filters to the operational data dataframe
-if not RAW_DF_OP.empty:
-    filtered_op = RAW_DF_OP.copy()
-    if selected_month != "All" and selected_month != "" and "PERIOD_MONTH" in filtered_op.columns:
-        filtered_op = filtered_op[filtered_op["PERIOD_MONTH"] == selected_month]
-    if selected_years and "YEAR" in filtered_op.columns:
-        # Ensure year column is clean for comparison
+    if not filtered_op.empty and "YEAR" in filtered_op.columns:
         filtered_op = filtered_op[filtered_op["YEAR"].notna()]
         filtered_op = filtered_op[filtered_op["YEAR"].astype(int).isin(selected_years)]
-else:
-    filtered_op = pd.DataFrame()
 
+# Month filter
+if selected_month != "All" and selected_month != "":
+    filtered = filtered[filtered["PERIOD_MONTH"] == selected_month]
+    if not filtered_op.empty and "PERIOD_MONTH" in filtered_op.columns:
+        filtered_op = filtered_op[filtered_op["PERIOD_MONTH"] == selected_month]
+
+# ** NEW **: If granularity is weekly and a month is selected, further filter to just the weeks of that month
+if granularity == "WEEK" and selected_month != "All":
+    # Get the valid weeks (as tuples of year, week) from the already month-filtered 'df'
+    weeks_in_month = filtered[['YEAR', 'WEEK']].drop_duplicates().to_records(index=False)
+    
+    # Filter the main dataframe by these weeks
+    filtered = df[df[['YEAR', 'WEEK']].isin(weeks_in_month).all(axis=1)]
+
+    # Filter the operational dataframe by these same weeks
+    if not filtered_op.empty:
+        filtered_op = RAW_DF_OP[RAW_DF_OP[['YEAR', 'WEEK']].isin(weeks_in_month).all(axis=1)]
+    
+    # Also re-apply the year filter to be safe
+    if selected_years:
+        filtered = filtered[filtered["YEAR"].isin(selected_years)].copy()
+        if not filtered_op.empty:
+            filtered_op = filtered_op[filtered_op["YEAR"].isin(selected_years)].copy()
 
 # Add a PDF button and tabs to the main app body
 st.sidebar.markdown("---")
@@ -868,27 +885,24 @@ if REPORTLAB_AVAILABLE:
         # KPI calculations for PDF (UPDATED LOGIC)
         # -------------------------
         _pdf_kpi_text = ""
-        if not filtered.empty and not filtered_op.empty:
+        if not filtered.empty:
             # Get available time from the original 'filtered' dataframe
-            available_time = None
-            try:
-                if "AVAILABLE_TIME_MONTH" in filtered.columns and filtered["AVAILABLE_TIME_MONTH"].notna().any():
-                    available_time = filtered.groupby("PERIOD_MONTH", dropna=True)["AVAILABLE_TIME_MONTH"].max().dropna().sum()
-                elif "AVAILABLE_HOURS" in filtered.columns and filtered["AVAILABLE_HOURS"].notna().any():
-                    available_time = filtered.groupby("PERIOD_MONTH", dropna=True)["AVAILABLE_HOURS"].max().dropna().sum()
-            except Exception:
-                available_time = None
-
+            available_time = 0
+            if "AVAILABLE_TIME_MONTH" in filtered.columns:
+                # We take the max value for each month present in the filter and sum them up
+                available_time = filtered.groupby('PERIOD_MONTH')['AVAILABLE_TIME_MONTH'].max().sum()
+            
             # Get delay data from the 'filtered_op' dataframe
             total_maintenance_delay = 0
             unscheduled_delay = 0
-            if "MAINTENANCE DELAY" in filtered_op.columns:
-                total_maintenance_delay = pd.to_numeric(filtered_op["MAINTENANCE DELAY"], errors='coerce').sum()
-            if "UNSCHEDULED" in filtered_op.columns:
-                unscheduled_delay = pd.to_numeric(filtered_op["UNSCHEDULED"], errors='coerce').sum()
+            if not filtered_op.empty:
+                if "MAINTENANCE DELAY" in filtered_op.columns:
+                    total_maintenance_delay = pd.to_numeric(filtered_op["MAINTENANCE DELAY"], errors='coerce').sum()
+                if "UNSCHEDULED" in filtered_op.columns:
+                    unscheduled_delay = pd.to_numeric(filtered_op["UNSCHEDULED"], errors='coerce').sum()
 
-            PA = max(0, 1 - total_maintenance_delay / available_time) if (available_time and available_time > 0) else None
-            MA = max(0, 1 - unscheduled_delay / available_time) if (available_time and available_time > 0) else None
+            PA = (available_time - total_maintenance_delay) / available_time if (available_time and available_time > 0) else None
+            MA = (available_time - unscheduled_delay) / available_time if (available_time and available_time > 0) else None
 
             # Build KPI header text for PDF
             try:
@@ -964,16 +978,13 @@ tabs = st.tabs(["Main Dashboard", "Reliability"])
 # -------------------------
 with tabs[0]:
     # -----------------------------------------------
-    # KPI calculations for display on dashboard (UPDATED LOGIC)
+    # KPI calculations for display on dashboard (REVISED LOGIC)
     # -----------------------------------------------
-    available_time = None
-    try:
-        if "AVAILABLE_TIME_MONTH" in filtered.columns and filtered["AVAILABLE_TIME_MONTH"].notna().any():
-            available_time = filtered.groupby("PERIOD_MONTH", dropna=True)["AVAILABLE_TIME_MONTH"].max().dropna().sum()
-        elif "AVAILABLE_HOURS" in filtered.columns and filtered["AVAILABLE_HOURS"].notna().any():
-            available_time = filtered.groupby("PERIOD_MONTH", dropna=True)["AVAILABLE_HOURS"].max().dropna().sum()
-    except Exception:
-        available_time = None
+    available_time = 0
+    if not filtered.empty and "AVAILABLE_TIME_MONTH" in filtered.columns:
+        # Group by the unique months within the filter, get the max available time for each, then sum them up.
+        # This correctly handles cases where multiple months are in the filtered range.
+        available_time = filtered.groupby('PERIOD_MONTH')['AVAILABLE_TIME_MONTH'].max().sum()
 
     total_maintenance_delay = 0
     unscheduled_delay = 0
@@ -983,8 +994,8 @@ with tabs[0]:
         if "UNSCHEDULED" in filtered_op.columns:
             unscheduled_delay = pd.to_numeric(filtered_op["UNSCHEDULED"], errors='coerce').sum()
 
-    PA = max(0, 1 - total_maintenance_delay / available_time) if (available_time and available_time > 0) else None
-    MA = max(0, 1 - unscheduled_delay / available_time) if (available_time and available_time > 0) else None
+    PA = (available_time - total_maintenance_delay) / available_time if (available_time > 0) else None
+    MA = (available_time - unscheduled_delay) / available_time if (available_time > 0) else None
 
     # Targets (no change in logic)
     pa_target = filtered["PA_TARGET"].dropna().unique().tolist() if "PA_TARGET" in filtered.columns else []
@@ -997,7 +1008,7 @@ with tabs[0]:
         ma_target = ma_target / 100.0
 
     # -------------------------
-    # YTD calculations (UPDATED LOGIC)
+    # YTD calculations (REVISED LOGIC)
     # -------------------------
     ytd_PA = ytd_MA = ytd_total_maintenance_delay = None
     try:
@@ -1015,19 +1026,17 @@ with tabs[0]:
                 ytd_df = df[df["YEAR"] == latest_year]
 
             # Filter operational DF for YTD
+            ytd_op_df = pd.DataFrame()
             if not RAW_DF_OP.empty:
-                op_period_dt = pd.to_datetime(RAW_DF_OP["PERIOD_MONTH"], format="%b %Y", errors="coerce")
-                ytd_op_df = RAW_DF_OP[(RAW_DF_OP["YEAR"] == latest_year) & (op_period_dt <= latest_period_dt)]
-            else:
-                ytd_op_df = pd.DataFrame()
+                op_df_ytd_filt = RAW_DF_OP.copy()
+                op_df_ytd_filt['YEAR'] = pd.to_numeric(op_df_ytd_filt['YEAR'], errors='coerce')
+                op_period_dt = pd.to_datetime(op_df_ytd_filt["PERIOD_MONTH"], format="%b %Y", errors="coerce")
+                ytd_op_df = op_df_ytd_filt[(op_df_ytd_filt["YEAR"] == latest_year) & (op_period_dt <= latest_period_dt)]
 
             # YTD Available Time from main YTD df
-            if "AVAILABLE_TIME_MONTH" in ytd_df.columns and ytd_df["AVAILABLE_TIME_MONTH"].notna().any():
-                ytd_available_time = ytd_df.groupby("PERIOD_MONTH")["AVAILABLE_TIME_MONTH"].max().dropna().sum()
-            elif "AVAILABLE_HOURS" in ytd_df.columns and ytd_df["AVAILABLE_HOURS"].notna().any():
-                ytd_available_time = ytd_df.groupby("PERIOD_MONTH")["AVAILABLE_HOURS"].max().dropna().sum()
-            else:
-                ytd_available_time = None
+            ytd_available_time = 0
+            if "AVAILABLE_TIME_MONTH" in ytd_df.columns:
+                ytd_available_time = ytd_df.groupby('PERIOD_MONTH')['AVAILABLE_TIME_MONTH'].max().sum()
             
             # YTD Delays from operational YTD df
             ytd_total_maintenance_delay = 0
@@ -1040,8 +1049,8 @@ with tabs[0]:
 
             # YTD PA and MA
             if ytd_available_time and ytd_available_time > 0:
-                ytd_PA = max(0, 1 - ytd_total_maintenance_delay / ytd_available_time)
-                ytd_MA = max(0, 1 - ytd_unscheduled_delay / ytd_available_time)
+                ytd_PA = (ytd_available_time - ytd_total_maintenance_delay) / ytd_available_time
+                ytd_MA = (ytd_available_time - ytd_unscheduled_delay) / ytd_available_time
             else:
                 ytd_PA = ytd_MA = None
     except Exception:
@@ -1125,14 +1134,11 @@ with tabs[0]:
     # 1. Aggregate available time from the "Data Delay Time" sheet
     if group_field == "WEEK":
         trend_avail = df.groupby(["YEAR", "WEEK"], dropna=False).agg(
-            available_time_month=("AVAILABLE_TIME_MONTH", "max"),
-            available_hours=("AVAILABLE_HOURS", "max")
+            available_time_month=("AVAILABLE_TIME_MONTH", "max")
         ).reset_index()
-        trend_avail["period_label"] = trend_avail["YEAR"].astype(str) + " W" + trend_avail["WEEK"].astype("Int64").astype(str)
     else: # PERIOD_MONTH
         trend_avail = df.groupby("PERIOD_MONTH", dropna=False).agg(
-            available_time_month=("AVAILABLE_TIME_MONTH", "max"),
-            available_hours=("AVAILABLE_HOURS", "max")
+            available_time_month=("AVAILABLE_TIME_MONTH", "max")
         ).reset_index()
 
     # 2. Aggregate maintenance delay from the "Data Operational" sheet
@@ -1144,97 +1150,97 @@ with tabs[0]:
             trend_delay = op_data_for_trend.groupby(["YEAR", "WEEK"], dropna=False).agg(
                 total_delay_hours=("MAINTENANCE DELAY", "sum")
             ).reset_index()
-            trend_delay["period_label"] = trend_delay["YEAR"].astype(str) + " W" + trend_delay["WEEK"].astype("Int64").astype(str)
-            
-            # Merge dataframes
-            trend = pd.merge(trend_avail, trend_delay, on="period_label", how="left")
-            
+            trend = pd.merge(trend_avail, trend_delay, on=["YEAR", "WEEK"], how="left")
+            trend["period_label"] = trend["YEAR"].astype(str) + " W" + trend["WEEK"].astype("Int64").astype(str)
         else: # PERIOD_MONTH
             trend_delay = op_data_for_trend.groupby("PERIOD_MONTH", dropna=False).agg(
                 total_delay_hours=("MAINTENANCE DELAY", "sum")
             ).reset_index()
-            
-            # Merge dataframes
             trend = pd.merge(trend_avail, trend_delay, on="PERIOD_MONTH", how="left")
         
         trend['total_delay_hours'] = trend['total_delay_hours'].fillna(0)
     else:
-        # If no operational data, create an empty delay column
         trend = trend_avail.copy()
         trend['total_delay_hours'] = 0
 
     # 3. Filter the combined trend data for plotting
     if not trend.empty:
-        if group_field == "WEEK":
-            # Add week_start for sorting and filtering
-            def _week_start_from_row(r):
-                try: return datetime.date.fromisocalendar(int(r["YEAR_x"]), int(r["WEEK_x"]), 1)
-                except Exception: return pd.NaT
-            trend["week_start"] = trend.apply(_week_start_from_row, axis=1)
+        # We must apply the user filters to the final trend dataframe
+        trend_filtered = trend.copy()
+        if granularity == "WEEK":
+            if selected_years:
+                trend_filtered = trend_filtered[trend_filtered["YEAR"].isin(selected_years)]
+            if selected_month != "All":
+                # To filter by month, we need to know which month each week belongs to
+                week_to_month_map = df[['YEAR', 'WEEK', 'PERIOD_MONTH']].drop_duplicates()
+                trend_filtered = pd.merge(trend_filtered, week_to_month_map, on=['YEAR', 'WEEK'], how='left')
+                trend_filtered = trend_filtered[trend_filtered['PERIOD_MONTH'] == selected_month]
             
-            # Filter for last 52 weeks from the global max week
-            latest_week_start_global = df["WEEK_START"].dropna().max() if "WEEK_START" in df.columns else pd.NaT
-            if pd.notna(latest_week_start_global):
-                cutoff_date = latest_week_start_global - datetime.timedelta(weeks=51)
-                trend = trend[trend["week_start"].notna() & (pd.to_datetime(trend["week_start"]) >= pd.to_datetime(cutoff_date))].copy()
-
-            trend = trend.sort_values(by=["week_start"])
+            # Sort and set x-axis
+            def _week_start_from_row(r):
+                try: return datetime.date.fromisocalendar(int(r["YEAR"]), int(r["WEEK"]), 1)
+                except Exception: return pd.NaT
+            trend_filtered["week_start"] = trend_filtered.apply(_week_start_from_row, axis=1)
+            trend_filtered = trend_filtered.sort_values(by=["week_start"])
             x_field = "period_label"
         else: # PERIOD_MONTH
-            trend["period_dt"] = pd.to_datetime(trend["PERIOD_MONTH"], format="%b %Y", errors="coerce")
-            trend = trend.sort_values(by=["period_dt"])
+            # Filter by month and year
+            if selected_month != "All":
+                trend_filtered = trend_filtered[trend_filtered["PERIOD_MONTH"] == selected_month]
+            if selected_years:
+                # Extract year from PERIOD_MONTH to filter
+                trend_filtered['year_from_period'] = pd.to_datetime(trend_filtered['PERIOD_MONTH'], format="%b %Y", errors='coerce').dt.year
+                trend_filtered = trend_filtered[trend_filtered['year_from_period'].isin(selected_years)]
+            
+            # Sort and set x-axis
+            trend_filtered["period_dt"] = pd.to_datetime(trend_filtered["PERIOD_MONTH"], format="%b %Y", errors="coerce")
+            trend_filtered = trend_filtered.sort_values(by=["period_dt"])
             x_field = "PERIOD_MONTH"
-
-        # Apply sidebar filters to the final trend dataframe
-        if selected_month != "All" and "PERIOD_MONTH" in trend.columns:
-            trend = trend[trend["PERIOD_MONTH"] == selected_month]
-        if selected_years and "YEAR_x" in trend.columns:
-            trend = trend[trend["YEAR_x"].isin(selected_years)]
-
+        
+        trend = trend_filtered # Overwrite with the filtered version
 
     # 4. Calculate PA% and format for plotting
-    trend["PA_pct"] = None
-    trend["available_for_pa"] = None
-    for idx, row in trend.iterrows():
-        avail = row.get("available_time_month", 0) if pd.notna(row.get("available_time_month")) else row.get("available_hours", 0)
-        avail = avail if pd.notna(avail) else 0
-        trend.at[idx,"available_for_pa"] = avail
-        if avail > 0:
-            trend.at[idx,"PA_pct"] = max(0, 1 - row["total_delay_hours"] / avail)
+    if not trend.empty:
+        trend["PA_pct"] = trend.apply(
+            lambda row: (row['available_time_month'] - row['total_delay_hours']) / row['available_time_month']
+            if pd.notna(row['available_time_month']) and row['available_time_month'] > 0 else None,
+            axis=1
+        )
+        trend["PA_pct_rounded"] = pd.to_numeric(trend["PA_pct"], errors="coerce").round(4)
+        trend["total_delay_hours_rounded"] = pd.to_numeric(trend["total_delay_hours"], errors="coerce").round(2)
 
-    trend["PA_pct_rounded"] = pd.to_numeric(trend["PA_pct"], errors="coerce").round(4)
-    trend["total_delay_hours_rounded"] = pd.to_numeric(trend["total_delay_hours"], errors="coerce").round(2)
+    # 5. Build the Plotly figure
+    if not trend.empty:
+        pa_threshold = pa_target if (pa_target is not None) else 0.9
+        colors = ["red" if v < pa_threshold else "green" for v in trend["PA_pct_rounded"].fillna(0)]
 
-    # 5. Build the Plotly figure (logic unchanged, uses new `trend` data)
-    pa_threshold = pa_target if (pa_target is not None) else 0.9
-    colors = ["red" if v < pa_threshold else "green" for v in trend["PA_pct_rounded"].fillna(0)]
+        fig_trend = go.Figure()
+        fig_trend.add_trace(go.Bar(
+            x=trend[x_field], y=trend["PA_pct_rounded"], name="PA%",
+            marker=dict(color=colors), hovertemplate="%{y:.2%}<extra></extra>"
+        ))
+        fig_trend.add_trace(go.Scatter(
+            x=trend[x_field], y=trend["total_delay_hours_rounded"], name="Total Maintenance Delay",
+            yaxis="y2", mode="lines+markers", hovertemplate="%{y:.2f} hrs<extra></extra>"
+        ))
+        fig_trend.add_shape(type="line", x0=0, x1=1, xref="paper", y0=pa_target, y1=pa_target, yref="y", line=dict(color="green", dash="dash"))
+        fig_trend.add_annotation(x=0, xref="paper", y=pa_target, yref="y", showarrow=False, text=f"PA Target {pa_target:.2%}", font=dict(color="green"), align="left", xanchor="left", yanchor="bottom")
+        fig_trend.update_layout(
+            xaxis_title="Period",
+            yaxis=dict(title="PA%", overlaying=None, side="left", tickformat=".2%", range=[0,1]),
+            yaxis2=dict(title="Maintenance Delay Hours", overlaying="y", side="right"),
+            legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02, yanchor="bottom"),
+            margin=dict(t=70)
+        )
 
-    fig_trend = go.Figure()
-    fig_trend.add_trace(go.Bar(
-        x=trend[x_field], y=trend["PA_pct_rounded"], name="PA%",
-        marker=dict(color=colors), hovertemplate="%{y:.2%}<extra></extra>"
-    ))
-    fig_trend.add_trace(go.Scatter(
-        x=trend[x_field], y=trend["total_delay_hours_rounded"], name="Total Maintenance Delay",
-        yaxis="y2", mode="lines+markers", hovertemplate="%{y:.2f} hrs<extra></extra>"
-    ))
-    fig_trend.add_shape(type="line", x0=0, x1=1, xref="paper", y0=pa_target, y1=pa_target, yref="y", line=dict(color="green", dash="dash"))
-    fig_trend.add_annotation(x=0, xref="paper", y=pa_target, yref="y", showarrow=False, text=f"PA Target {pa_target:.2%}", font=dict(color="green"), align="left", xanchor="left", yanchor="bottom")
-    fig_trend.update_layout(
-        xaxis_title="Period",
-        yaxis=dict(title="PA%", overlaying=None, side="left", tickformat=".2%", range=[0,1]),
-        yaxis2=dict(title="Maintenance Delay Hours", overlaying="y", side="right"),
-        legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02, yanchor="bottom"),
-        margin=dict(t=70)
-    )
-
-    # Cache PNG for PDF
-    png = _fig_to_png_bytes(fig_trend)
-    if not png:
-        png = _mpl_png_trend_from_df(trend, x_field=x_field, pa_col="PA_pct_rounded", delay_col="total_delay_hours_rounded", title="Trend: Total Delay Hours vs PA%")
-    if png:
-        st.session_state['pdf_fig_trend'] = png
-    st.plotly_chart(fig_trend, use_container_width=True)
+        png = _fig_to_png_bytes(fig_trend)
+        if not png:
+            png = _mpl_png_trend_from_df(trend, x_field=x_field, pa_col="PA_pct_rounded", delay_col="total_delay_hours_rounded", title="Trend: Total Delay Hours vs PA%")
+        if png:
+            st.session_state['pdf_fig_trend'] = png
+        st.plotly_chart(fig_trend, use_container_width=True)
+    else:
+        st.info("No data available for the selected trend analysis filters.")
 
 
     st.markdown("---")
@@ -1528,7 +1534,7 @@ with tabs[1]:
     # MTTR & MTBF per Equipment Table
     # -------------------------
     st.subheader("MTTR & MTBF per Equipment")
-    st.markdown(f"View by: **{granularity.replace('_', ' ').title()}** (change in sidebar)")
+    st.markdown(f"View by: **{granularity_display}** (change in sidebar)") # Use display name
 
     df_delay_time = filtered.copy()
     df_op = RAW_DF_OP.copy() if isinstance(RAW_DF_OP, pd.DataFrame) else pd.DataFrame()
@@ -1594,8 +1600,6 @@ with tabs[1]:
         if not display_df.empty:
             gb = GridOptionsBuilder.from_dataframe(display_df)
 
-            # --- THIS IS THE ONLY CHANGE IN THIS UPDATE ---
-            # Automatically resize columns to fit header text
             gb.configure_grid_options(autoSizeStrategy=dict(type='fitGridWidth'))
 
             gb.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
@@ -1605,7 +1609,6 @@ with tabs[1]:
                 display_df,
                 gridOptions=grid_options,
                 height=500,
-                # The fit_columns_on_grid_load parameter is superseded by autoSizeStrategy
                 theme="balham",
                 key=f'aggrid_{granularity}'
             )

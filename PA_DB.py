@@ -485,7 +485,7 @@ def load_data_from_url():
     df["YEAR"] = pd.to_numeric(df["YEAR"], errors="coerce").astype("Int64")
     df["WEEK"] = pd.to_numeric(df["WEEK"], errors="coerce").astype("Int64")
 
-    # Add PERIOD_MONTH if missing
+    # Add PERIOD_MONTH if missing - THIS IS THE CORRECT LOGIC NOW
     if "PERIOD_MONTH" not in df.columns or df["PERIOD_MONTH"].isnull().all() or (df["PERIOD_MONTH"].astype(str).str.strip()=="").all():
         if "MONTH" in df.columns and "YEAR" in df.columns:
             df["PERIOD_MONTH"] = df["MONTH"].astype(str).str.strip() + " " + df["YEAR"].astype(str)
@@ -540,13 +540,8 @@ def load_data_from_url():
 
     df["WEEK_START"] = df.apply(_compute_week_start, axis=1)
 
-    # assign each ISO-week to the month containing the week end (latest month of that week)
-    try:
-        week_start_dt = pd.to_datetime(df["WEEK_START"], errors="coerce")
-        week_end_dt = week_start_dt + pd.Timedelta(days=6)
-        df.loc[week_start_dt.notna(), "PERIOD_MONTH"] = week_end_dt.dt.strftime("%b %Y")
-    except Exception:
-        pass
+    # ***REMOVED*** the logic that overwrites PERIOD_MONTH based on week.
+    # This was the source of the trend issue.
 
     return df
 
@@ -774,9 +769,15 @@ st.sidebar.header("Filters & Options")
 st.sidebar.markdown("---")
 
 # -------------------------
-# Time granularity / Month / Year filters
+# Time granularity / Month / Year filters (UPDATED)
 # -------------------------
-granularity = st.sidebar.selectbox("Time granularity", options=["WEEK", "PERIOD_MONTH"], index=1)
+# Use a format_func to change the display label without changing the underlying value
+granularity = st.sidebar.selectbox(
+    "Time granularity",
+    options=["WEEK", "PERIOD_MONTH"],
+    format_func=lambda x: 'Month' if x == 'PERIOD_MONTH' else 'Week',
+    index=1
+)
 
 # Build month list from PERIOD_MONTH chronologically
 months_available = []
@@ -1088,7 +1089,7 @@ with tabs[0]:
     st.markdown("---")
 
     # -------------------------
-    # Trend Analysis
+    # Trend Analysis (UPDATED LOGIC)
     # -------------------------
     st.subheader("Trend: Total Delay Hours vs PA%")
     group_field = granularity
@@ -1304,9 +1305,12 @@ with tabs[0]:
         drill_df_base = filtered.copy()
 
     # -------------------------
-    # Drill-down table (unchanged except auto-fit & ordering)
+    # Drill-down table (UPDATED with auto-resize and time formatting)
     # -------------------------
     st.subheader("Drill-down data (filtered by selected category)")
+    
+    # NEW: Add a checkbox for auto-resizing columns
+    fit_columns = st.checkbox("Auto-resize columns to fit content", value=True)
 
     details_df = drill_df_base.copy()
     if "PERIOD_MONTH" in details_df.columns:
@@ -1316,6 +1320,10 @@ with tabs[0]:
     for c in required_cols:
         if c not in details_df.columns:
             details_df[c] = ""
+            
+    # NEW: Format START and STOP columns to show only time
+    details_df['START'] = pd.to_datetime(details_df['START'], errors='coerce').dt.strftime('%H:%M:%S').fillna('N/A')
+    details_df['STOP'] = pd.to_datetime(details_df['STOP'], errors='coerce').dt.strftime('%H:%M:%S').fillna('N/A')
 
     details_out = details_df[["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "EQ_DESC", "DELAY", "NOTE", "PICA", "SUB_CATEGORY", "YEAR"]].copy()
     details_out = details_out.rename(columns={"EQ_DESC": "Equipment Description"})
@@ -1361,7 +1369,7 @@ with tabs[0]:
         update_mode=GridUpdateMode.NO_UPDATE,
         allow_unsafe_jscode=False,
         height=600,
-        fit_columns_on_grid_load=True,
+        fit_columns_on_grid_load=fit_columns, # Connects to the checkbox
         theme="balham"
     )
 

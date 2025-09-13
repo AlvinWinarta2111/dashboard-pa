@@ -329,23 +329,35 @@ with title_col:
     st.title("Physical Availability Dashboard — Data Delay Time")
 
 # -------------------------
-# Load + Clean function (UPDATED)
+# Config: source workbook URL (UPDATED AND CORRECTED)
+# -------------------------
+RAW_URL = "https://raw.githubusercontent.com/AlvinWinarta2111/dashboard-pa/main/Database%20Delay%20CHPP.xlsx"
+
+# -------------------------
+# Load + Clean function (UPDATED to read from correct URL)
 # -------------------------
 @st.cache_data
 def load_data_from_url():
-    # Define the local filename to read
-    file_name = "Database Delay CHPP.xlsx - Data Delay Time.csv"
     try:
-        # Read the local CSV file directly
-        df = pd.read_csv(file_name)
-    except FileNotFoundError:
-        st.error(f"Error: The file '{file_name}' was not found. Please make sure it's in the same directory as the script.")
-        return None
+        # Read the raw excel file from the URL, reading the first sheet to find the header
+        raw = pd.read_excel(RAW_URL, sheet_name="Data Delay Time", header=None)
     except Exception as e:
-        st.error(f"Unable to read the file '{file_name}': {e}")
+        st.error(f"Unable to read sheet 'Data Delay Time' from the URL. Please check the link and sheet name. Error: {e}")
         return None
 
-    # The rest of the cleaning logic remains the same
+    # Detect header row (first 20 rows)
+    header_row = None
+    for i in range(20):
+        row_values = raw.iloc[i].astype(str).str.upper().tolist()
+        if "WEEK" in row_values or "MONTH" in row_values or "YEAR" in row_values:
+            header_row = i
+            break
+    if header_row is None:
+        st.error("Could not detect header row automatically. Please check the Excel file format.")
+        return None
+
+    # Now read the excel file again, this time with the correct header row
+    df = pd.read_excel(RAW_URL, sheet_name="Data Delay Time", header=header_row)
     df.columns = [str(c).strip() for c in df.columns]
 
     # normalize some column names
@@ -546,22 +558,18 @@ if df is None:
     st.stop()
 
 # -------------------------
-# NEW: compute MTBF & MTTR from "Data Operational" sheet (UPDATED)
+# NEW: compute MTBF & MTTR from "Data Operational" sheet (UPDATED to read from correct URL)
 # -------------------------
 @st.cache_data
-def compute_mtbf_mttr_from_url(): # Parameter removed
+def compute_mtbf_mttr_from_url(raw_url):
     """
-    Reads the Data Operational CSV and computes weekly/monthly MTBF & MTTR.
+    Reads the Data Operational sheet from the Excel file URL and computes weekly/monthly MTBF & MTTR.
     """
-    file_name = "Database Delay CHPP.xlsx - Data Operational.csv"
     try:
-        # Read the local CSV file for operational data
-        df_op = pd.read_csv(file_name)
-    except FileNotFoundError:
-        return {"error": f"Error: The file '{file_name}' was not found. Please make sure it's in the same directory as the script."}
+        # Since we don't know the header location, we read the specific sheet from the URL
+        df_op = pd.read_excel(raw_url, sheet_name="Data Operational")
     except Exception as e:
-        return {"error": f"Could not read file '{file_name}': {e}"}
-
+        return {"error": f"Could not read sheet 'Data Operational': {e}"}
 
     # detect columns
     op_col = None
@@ -728,7 +736,7 @@ def compute_mtbf_mttr_from_url(): # Parameter removed
     monthly_group = monthly_group.sort_values("period_dt").reset_index(drop=True)
 
     return {
-        "sheet_name": "Data Operational (from CSV)",
+        "sheet_name": "Data Operational",
         "operational_hours_column": op_col,
         "maintenance_delay_column": maint_col,
         "date_column": date_col,
@@ -743,7 +751,7 @@ def compute_mtbf_mttr_from_url(): # Parameter removed
     }
 
 # call the MTBF/MTTR computation (UPDATED)
-_mtbf_mttr_res = compute_mtbf_mttr_from_url()
+_mtbf_mttr_res = compute_mtbf_mttr_from_url(RAW_URL)
 
 # Expose reliability globals
 MTBF_GLOBAL_HOURS = _mtbf_mttr_res.get("MTBF_hours_overall") if isinstance(_mtbf_mttr_res, dict) else None

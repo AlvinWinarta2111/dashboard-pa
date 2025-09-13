@@ -539,10 +539,7 @@ def load_data_from_url():
         return pd.NaT
 
     df["WEEK_START"] = df.apply(_compute_week_start, axis=1)
-
-    # ***REMOVED*** the logic that overwrites PERIOD_MONTH based on week.
-    # This was the source of the trend issue.
-
+    
     return df
 
 # -------------------------
@@ -841,7 +838,8 @@ else:
 # Apply selected filters to df (month & years)
 # -------------------------
 filtered = df.copy()
-if selected_month != "All" and selected_month != "":
+# The month filter is now only applied if granularity is MONTH
+if granularity == 'PERIOD_MONTH' and selected_month != "All" and selected_month != "":
     filtered = filtered[filtered["PERIOD_MONTH"] == selected_month]
 if selected_years:
     if "YEAR" in filtered.columns:
@@ -1093,24 +1091,33 @@ with tabs[0]:
     # -------------------------
     st.subheader("Trend: Total Delay Hours vs PA%")
     group_field = granularity
+    
+    # NEW: Create a separate dataframe for the trend chart to handle filtering logic
+    if group_field == "WEEK":
+        # For weekly view, ignore the month filter and only use the year filter on the original dataframe
+        df_for_trend = df[df['YEAR'].isin(selected_years)].copy()
+    else:
+        # For monthly view, use the globally filtered dataframe
+        df_for_trend = filtered.copy()
+
 
     # Use GLOBAL latest week for 52-week cutoff
     if group_field == "WEEK":
         latest_week_start_global = df["WEEK_START"].dropna().max() if "WEEK_START" in df.columns else pd.NaT
         if pd.isna(latest_week_start_global):
-            latest_week_start = filtered["WEEK_START"].dropna().max() if "WEEK_START" in filtered.columns else pd.NaT
+            latest_week_start = df_for_trend["WEEK_START"].dropna().max() if "WEEK_START" in df_for_trend.columns else pd.NaT
         else:
             latest_week_start = latest_week_start_global
 
         if pd.isna(latest_week_start):
-            filtered_for_trend = filtered.copy()
+            filtered_for_trend = df_for_trend.copy()
         else:
             cutoff_date = latest_week_start - datetime.timedelta(weeks=51)
-            filtered_for_trend = filtered[filtered["WEEK_START"].notna() & (pd.to_datetime(filtered["WEEK_START"]) >= pd.to_datetime(cutoff_date))].copy()
+            filtered_for_trend = df_for_trend[df_for_trend["WEEK_START"].notna() & (pd.to_datetime(df_for_trend["WEEK_START"]) >= pd.to_datetime(cutoff_date))].copy()
             if filtered_for_trend.empty:
-                filtered_for_trend = filtered.copy()
+                filtered_for_trend = df_for_trend.copy()
     else:
-        filtered_for_trend = filtered.copy()
+        filtered_for_trend = df_for_trend.copy()
 
     if group_field == "WEEK":
         trend = filtered_for_trend.groupby(["YEAR","WEEK"], dropna=False).agg(
@@ -1129,7 +1136,7 @@ with tabs[0]:
         x_field = "period_label"
 
     elif group_field == "PERIOD_MONTH":
-        trend = filtered.groupby("PERIOD_MONTH", dropna=False).agg(
+        trend = filtered_for_trend.groupby("PERIOD_MONTH", dropna=False).agg(
             total_delay_hours=("DELAY","sum"),
             available_time_month=("AVAILABLE_TIME_MONTH","max"),
             available_hours=("AVAILABLE_HOURS","max")
@@ -1137,21 +1144,26 @@ with tabs[0]:
         trend["period_dt"] = pd.to_datetime(trend["PERIOD_MONTH"], format="%b %Y", errors="coerce")
         trend = trend.sort_values(by=["period_dt", "PERIOD_MONTH"])
         x_field = "PERIOD_MONTH"
-    else:
-        trend = filtered.groupby(group_field).agg(total_delay_hours=("DELAY","sum"), available_time_month=("AVAILABLE_TIME_MONTH","max"), available_hours=("AVAILABLE_HOURS","max")).reset_index()
+    else: # Fallback
+        trend = filtered_for_trend.groupby(group_field).agg(total_delay_hours=("DELAY","sum"), available_time_month=("AVAILABLE_TIME_MONTH","max"), available_hours=("AVAILABLE_HOURS","max")).reset_index()
         x_field = group_field
 
     trend["PA_pct"] = None
     trend["available_for_pa"] = None
+    
+    # NEW: Correct PA% calculation logic
     for idx, row in trend.iterrows():
-        avail_month = row.get("available_time_month", None)
-        avail_hours = row.get("available_hours", None)
-        if pd.notna(avail_month) and avail_month > 0:
-            avail = avail_month
-        elif pd.notna(avail_hours) and avail_hours > 0:
-            avail = avail_hours
-        else:
-            avail = None
+        avail = None
+        if group_field == "WEEK":
+            avail = 168 # 24 hours * 7 days
+        else: # For MONTH
+            avail_month = row.get("available_time_month", None)
+            avail_hours = row.get("available_hours", None)
+            if pd.notna(avail_month) and avail_month > 0:
+                avail = avail_month
+            elif pd.notna(avail_hours) and avail_hours > 0:
+                avail = avail_hours
+
         trend.at[idx,"available_for_pa"] = avail
         if avail and avail > 0:
             trend.at[idx,"PA_pct"] = max(0, 1 - row["total_delay_hours"] / avail)

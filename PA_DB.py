@@ -558,7 +558,7 @@ if df is None:
     st.stop()
 
 # -------------------------
-# NEW: compute MTBF & MTTR from "Data Operational" sheet (UPDATED to read from correct URL)
+# NEW: compute MTBF & MTTR from "Data Operational" sheet (CORRECTED HEADER DETECTION)
 # -------------------------
 @st.cache_data
 def compute_mtbf_mttr_from_url(raw_url):
@@ -566,10 +566,23 @@ def compute_mtbf_mttr_from_url(raw_url):
     Reads the Data Operational sheet from the Excel file URL and computes weekly/monthly MTBF & MTTR.
     """
     try:
-        # Since we don't know the header location, we read the specific sheet from the URL
-        df_op = pd.read_excel(raw_url, sheet_name="Data Operational")
+        # Read without header to find it manually
+        raw_op = pd.read_excel(raw_url, sheet_name="Data Operational", header=None)
     except Exception as e:
         return {"error": f"Could not read sheet 'Data Operational': {e}"}
+
+    # Detect header row for operational data (CRITICAL FIX)
+    header_row_op = None
+    for i in range(20):
+        row_values = raw_op.iloc[i].astype(str).str.upper().tolist()
+        if "OPERATIONAL HOURS" in row_values or "MAINTENANCE DELAY" in row_values:
+            header_row_op = i
+            break
+    if header_row_op is None:
+        return {"error": "Could not detect header row in 'Data Operational' sheet."}
+
+    # Now read the excel file again, this time with the correct header row
+    df_op = pd.read_excel(raw_url, sheet_name="Data Operational", header=header_row_op)
 
     # detect columns
     op_col = None
@@ -616,35 +629,44 @@ def compute_mtbf_mttr_from_url(raw_url):
     def _parse_operational_hours(val):
         try:
             if pd.isna(val) or (isinstance(val, str) and str(val).strip() == ""):
-                return float("nan")
+                return 0.0 # Return 0 instead of NaN to avoid issues in sum
+            # If it's a datetime object (from Excel read)
+            if isinstance(val, datetime.time):
+                return (val.hour * 3600 + val.minute * 60 + val.second) / 3600.0
+            # If it's a numeric value (already in hours)
             if isinstance(val, (int, float)) and not isinstance(val, bool):
                 v = float(val)
-                if 0 < v < 1:
+                if 0 < v < 1: # Handle Excel time fractions
                     return v * 24.0
                 return v
+            # If it's a string
             s = str(val).strip()
             if ":" in s:
                 try:
-                    # Handle HH:MM and HH:MM:SS by ensuring it's treated as a timedelta
-                    return pd.to_timedelta(s).total_seconds() / 3600.0
+                    parts = s.split(':')
+                    hours = int(parts[0])
+                    minutes = int(parts[1]) if len(parts) > 1 else 0
+                    seconds = int(parts[2]) if len(parts) > 2 else 0
+                    return hours + minutes/60 + seconds/3600
                 except Exception:
-                    pass
+                    return 0.0
+            # If it's a string that can be converted to float
             try:
                 return float(s)
             except Exception:
-                return float("nan")
+                return 0.0
         except Exception:
-            return float("nan")
+            return 0.0
 
     if op_col is not None:
         df_op["_op_hours_dec"] = df_op[op_col].apply(_parse_operational_hours)
     else:
-        df_op["_op_hours_dec"] = pd.Series([float("nan")] * len(df_op))
+        df_op["_op_hours_dec"] = pd.Series([0.0] * len(df_op))
 
     if maint_col is not None:
-        df_op["_maint_delay_num"] = pd.to_numeric(df_op[maint_col], errors="coerce")
+        df_op["_maint_delay_num"] = pd.to_numeric(df_op[maint_col], errors="coerce").fillna(0)
     else:
-        df_op["_maint_delay_num"] = pd.Series([float("nan")] * len(df_op))
+        df_op["_maint_delay_num"] = pd.Series([0.0] * len(df_op))
 
     # parse date column if present
     if date_col is not None:
@@ -985,8 +1007,8 @@ with tabs[0]:
         available_time = filtered.groupby('PERIOD_MONTH')['AVAILABLE_TIME_MONTH'].max().sum()
 
     total_maintenance_delay = 0
-    if not filtered_op.empty and "MAINTENANCE DELAY" in filtered_op.columns:
-        total_maintenance_delay = pd.to_numeric(filtered_op["MAINTENANCE DELAY"], errors='coerce').sum()
+    if not filtered_op.empty and "_maint_delay_num" in filtered_op.columns:
+        total_maintenance_delay = filtered_op["_maint_delay_num"].sum()
         
     PA = (available_time - total_maintenance_delay) / available_time if (available_time > 0) else None
 
@@ -1039,8 +1061,8 @@ with tabs[0]:
             if "AVAILABLE_TIME_MONTH" in ytd_df.columns:
                 ytd_available_time = ytd_df.groupby('PERIOD_MONTH')['AVAILABLE_TIME_MONTH'].max().sum()
             ytd_total_maintenance_delay = 0
-            if not ytd_op_df.empty and "MAINTENANCE DELAY" in ytd_op_df.columns:
-                ytd_total_maintenance_delay = pd.to_numeric(ytd_op_df["MAINTENANCE DELAY"], errors='coerce').sum()
+            if not ytd_op_df.empty and "_maint_delay_num" in ytd_op_df.columns:
+                ytd_total_maintenance_delay = ytd_op_df["_maint_delay_num"].sum()
             ytd_PA = (ytd_available_time - ytd_total_maintenance_delay) / ytd_available_time if ytd_available_time > 0 else None
 
             # YTD MA Calculation
@@ -1141,19 +1163,18 @@ with tabs[0]:
         ).reset_index()
 
     # 2. Aggregate maintenance delay from the "Data Operational" sheet
-    if not RAW_DF_OP.empty and "MAINTENANCE DELAY" in RAW_DF_OP.columns:
+    if not RAW_DF_OP.empty and "_maint_delay_num" in RAW_DF_OP.columns:
         op_data_for_trend = RAW_DF_OP.copy()
-        op_data_for_trend['MAINTENANCE DELAY'] = pd.to_numeric(op_data_for_trend['MAINTENANCE DELAY'], errors='coerce').fillna(0)
         
         if group_field == "WEEK":
             trend_delay = op_data_for_trend.groupby(["YEAR", "WEEK"], dropna=False).agg(
-                total_delay_hours=("MAINTENANCE DELAY", "sum")
+                total_delay_hours=("_maint_delay_num", "sum")
             ).reset_index()
             trend = pd.merge(trend_avail, trend_delay, on=["YEAR", "WEEK"], how="left")
             trend["period_label"] = trend["YEAR"].astype('Int64').astype(str) + " W" + trend["WEEK"].astype('Int64').astype(str)
         else: # PERIOD_MONTH
             trend_delay = op_data_for_trend.groupby("PERIOD_MONTH", dropna=False).agg(
-                total_delay_hours=("MAINTENANCE DELAY", "sum")
+                total_delay_hours=("_maint_delay_num", "sum")
             ).reset_index()
             trend = pd.merge(trend_avail, trend_delay, on="PERIOD_MONTH", how="left")
         

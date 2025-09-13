@@ -331,8 +331,7 @@ with title_col:
 # -------------------------
 # Config: source workbook URL (unchanged)
 # -------------------------
-RAW_URL = "https://github.com/AlvinWinarta2111/dashboard-pa/blob/main/Database%20Delay%20CHPP.xlsx?raw=true"
-
+RAW_URL = "https://raw.githubusercontent.com/AlvinWinarta2111/dashboard-pa/main/Database%20Delay%20CHPP.xlsx"
 # -------------------------
 # Load + Clean function
 # -------------------------

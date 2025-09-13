@@ -928,8 +928,6 @@ with tabs[0]:
     st.plotly_chart(fig_trend, use_container_width=True)
 
     st.markdown("---")
-    
-    # (The rest of the script from Pareto onwards remains unchanged)
     # Pareto by Equipment
     st.subheader("Top Delay by Equipment (Pareto)")
 
@@ -1086,17 +1084,10 @@ with tabs[0]:
 # START: RELIABILITY TAB CONTENT
 # -------------------------
 with tabs[1]:
-    # (The reliability tab remains unchanged from your original full script)
     st.subheader("Reliability: MTBF & MTTR")
-    # ... and so on for the rest of your reliability tab code
-# -------------------------
-# START: RELIABILITY TAB CONTENT
-# -------------------------
-with tabs[1]:
+    # This entire tab remains the same as your fully functional version
     weekly_df_global = _mtbf_mttr_res.get("weekly_df") if isinstance(_mtbf_mttr_res, dict) else pd.DataFrame()
     monthly_df_global = _mtbf_mttr_res.get("monthly_df") if isinstance(_mtbf_mttr_res, dict) else pd.DataFrame()
-
-    st.subheader("Reliability: MTBF & MTTR")
 
     weekly_df = weekly_df_global.copy() if isinstance(weekly_df_global, pd.DataFrame) else pd.DataFrame()
     monthly_df = monthly_df_global.copy() if isinstance(monthly_df_global, pd.DataFrame) else pd.DataFrame()

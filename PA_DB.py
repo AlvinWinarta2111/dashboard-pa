@@ -849,7 +849,8 @@ if selected_years:
     if "YEAR" in filtered.columns:
         filtered = filtered[filtered["YEAR"].isin(selected_years)].copy()
     if not filtered_op.empty and "YEAR" in filtered_op.columns:
-        filtered_op = filtered_op[filtered_op["YEAR"].notna()]
+        filtered_op['YEAR'] = pd.to_numeric(filtered_op['YEAR'], errors='coerce')
+        filtered_op = filtered_op.dropna(subset=['YEAR'])
         filtered_op = filtered_op[filtered_op["YEAR"].astype(int).isin(selected_years)]
 
 # Month filter
@@ -867,14 +868,17 @@ if granularity == "WEEK" and selected_month != "All":
     filtered = df[df[['YEAR', 'WEEK']].isin(weeks_in_month).all(axis=1)]
 
     # Filter the operational dataframe by these same weeks
-    if not filtered_op.empty:
+    if not RAW_DF_OP.empty:
+        # Important: must use the original RAW_DF_OP to not double-filter
         filtered_op = RAW_DF_OP[RAW_DF_OP[['YEAR', 'WEEK']].isin(weeks_in_month).all(axis=1)]
     
     # Also re-apply the year filter to be safe
     if selected_years:
         filtered = filtered[filtered["YEAR"].isin(selected_years)].copy()
         if not filtered_op.empty:
-            filtered_op = filtered_op[filtered_op["YEAR"].isin(selected_years)].copy()
+            filtered_op['YEAR'] = pd.to_numeric(filtered_op['YEAR'], errors='coerce')
+            filtered_op = filtered_op.dropna(subset=['YEAR'])
+            filtered_op = filtered_op[filtered_op["YEAR"].astype(int).isin(selected_years)]
 
 # Add a PDF button and tabs to the main app body
 st.sidebar.markdown("---")
@@ -1091,6 +1095,7 @@ with tabs[0]:
     with donut1_col:
         st.subheader("Delay by Category")
         if "CATEGORY" in filtered.columns:
+            # THIS CHART USES 'DELAY' FROM "Data Delay Time" AS REQUESTED
             donut_data = filtered.groupby("CATEGORY", dropna=False)["DELAY"].sum().reset_index().sort_values("DELAY", ascending=False)
             if not donut_data.empty:
                 donut_data["DELAY"] = donut_data["DELAY"].round(2)
@@ -1106,6 +1111,7 @@ with tabs[0]:
     with donut2_col:
         st.subheader("Scheduled vs Unscheduled (Maintenance only)")
         if "MTN_DELAY_TYPE" in filtered.columns:
+            # THIS CHART KEEPS ITS ORIGINAL LOGIC AS REQUESTED
             maint_df = filtered[filtered["CATEGORY"] == "Maintenance"].copy()
             if not maint_df.empty:
                 sched_donut = maint_df.groupby("SUB_CATEGORY")["DELAY"].sum().reset_index().sort_values("DELAY", ascending=False)
@@ -1151,7 +1157,7 @@ with tabs[0]:
                 total_delay_hours=("MAINTENANCE DELAY", "sum")
             ).reset_index()
             trend = pd.merge(trend_avail, trend_delay, on=["YEAR", "WEEK"], how="left")
-            trend["period_label"] = trend["YEAR"].astype(str) + " W" + trend["WEEK"].astype("Int64").astype(str)
+            trend["period_label"] = trend["YEAR"].astype('Int64').astype(str) + " W" + trend["WEEK"].astype('Int64').astype(str)
         else: # PERIOD_MONTH
             trend_delay = op_data_for_trend.groupby("PERIOD_MONTH", dropna=False).agg(
                 total_delay_hours=("MAINTENANCE DELAY", "sum")
@@ -1163,9 +1169,8 @@ with tabs[0]:
         trend = trend_avail.copy()
         trend['total_delay_hours'] = 0
 
-    # 3. Filter the combined trend data for plotting
+    # 3. Filter the combined trend data based on sidebar selections
     if not trend.empty:
-        # We must apply the user filters to the final trend dataframe
         trend_filtered = trend.copy()
         if granularity == "WEEK":
             if selected_years:
@@ -1176,7 +1181,6 @@ with tabs[0]:
                 trend_filtered = pd.merge(trend_filtered, week_to_month_map, on=['YEAR', 'WEEK'], how='left')
                 trend_filtered = trend_filtered[trend_filtered['PERIOD_MONTH'] == selected_month]
             
-            # Sort and set x-axis
             def _week_start_from_row(r):
                 try: return datetime.date.fromisocalendar(int(r["YEAR"]), int(r["WEEK"]), 1)
                 except Exception: return pd.NaT
@@ -1184,20 +1188,17 @@ with tabs[0]:
             trend_filtered = trend_filtered.sort_values(by=["week_start"])
             x_field = "period_label"
         else: # PERIOD_MONTH
-            # Filter by month and year
             if selected_month != "All":
                 trend_filtered = trend_filtered[trend_filtered["PERIOD_MONTH"] == selected_month]
             if selected_years:
-                # Extract year from PERIOD_MONTH to filter
                 trend_filtered['year_from_period'] = pd.to_datetime(trend_filtered['PERIOD_MONTH'], format="%b %Y", errors='coerce').dt.year
                 trend_filtered = trend_filtered[trend_filtered['year_from_period'].isin(selected_years)]
             
-            # Sort and set x-axis
             trend_filtered["period_dt"] = pd.to_datetime(trend_filtered["PERIOD_MONTH"], format="%b %Y", errors="coerce")
             trend_filtered = trend_filtered.sort_values(by=["period_dt"])
             x_field = "PERIOD_MONTH"
         
-        trend = trend_filtered # Overwrite with the filtered version
+        trend = trend_filtered.copy() # Use the filtered version
 
     # 4. Calculate PA% and format for plotting
     if not trend.empty:
@@ -1210,7 +1211,7 @@ with tabs[0]:
         trend["total_delay_hours_rounded"] = pd.to_numeric(trend["total_delay_hours"], errors="coerce").round(2)
 
     # 5. Build the Plotly figure
-    if not trend.empty:
+    if not trend.empty and x_field in trend.columns:
         pa_threshold = pa_target if (pa_target is not None) else 0.9
         colors = ["red" if v < pa_threshold else "green" for v in trend["PA_pct_rounded"].fillna(0)]
 
@@ -1331,7 +1332,7 @@ with tabs[0]:
         drill_df_base = filtered.copy()
 
     # -------------------------
-    # Drill-down table (unchanged except auto-fit & ordering)
+    # Drill-down table (START/STOP FORMATTING FIXED)
     # -------------------------
     st.subheader("Drill-down data (filtered by selected category)")
 
@@ -1343,6 +1344,10 @@ with tabs[0]:
     for c in required_cols:
         if c not in details_df.columns:
             details_df[c] = ""
+            
+    # Format START and STOP columns to show only time
+    for col in ["START", "STOP"]:
+        details_df[col] = pd.to_datetime(details_df[col], errors='coerce').dt.strftime('%H:%M:%S')
 
     details_out = details_df[["WEEK", "MONTH", "DATE", "START", "STOP", "EQUIPMENT", "EQ_DESC", "DELAY", "NOTE", "PICA", "SUB_CATEGORY", "YEAR"]].copy()
     details_out = details_out.rename(columns={"EQ_DESC": "Equipment Description"})
